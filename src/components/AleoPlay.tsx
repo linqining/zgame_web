@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ArrowLeft, CheckCircle2, LoaderCircle, LogOut, RefreshCw, WalletCards } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Copy, LoaderCircle, LogOut, RefreshCw, WalletCards } from "lucide-react";
 import {
   ZgameAleoApi,
   type AleoJob,
@@ -39,6 +39,7 @@ export function AleoPlay() {
   const [players, setPlayers] = useState("");
   const [table, setTable] = useState<AleoTable>();
   const [tableId, setTableId] = useState("");
+  const [joinTableId, setJoinTableId] = useState("");
   const [status, setStatus] = useState("Connect an Aleo wallet to start a private table");
   const [busy, setBusy] = useState(false);
 
@@ -159,6 +160,41 @@ export function AleoPlay() {
     }
   }
 
+  async function joinExistingTable() {
+    if (!session) {
+      setStatus("Connect an Aleo wallet first");
+      return;
+    }
+    const requestedId = joinTableId.trim();
+    if (!requestedId) {
+      setStatus("Enter a table ID to join");
+      return;
+    }
+    setBusy(true);
+    setStatus("Loading the canonical Aleo table…");
+    try {
+      const next = await api.table(session, requestedId);
+      setTable(next);
+      setTableId(next.id);
+      const seated = next.seats.some((seat) => seat.address === session.address);
+      setStatus(seated ? "Wallet seat confirmed; waiting for the current turn" : "Table loaded, but this wallet is not one of its seats");
+    } catch (error) {
+      setStatus(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyTableId() {
+    if (!table) return;
+    try {
+      await navigator.clipboard.writeText(table.id);
+      setStatus("Full table ID copied");
+    } catch {
+      setStatus(table.id);
+    }
+  }
+
   async function play(kind: ActionKind, amount?: number) {
     if (!session || !table) return;
     setBusy(true);
@@ -257,7 +293,18 @@ export function AleoPlay() {
           </div>
 
           <div className="card p-5 sm:p-6">
-            {!session ? <div className="flex min-h-[420px] flex-col items-center justify-center text-center"><LoaderCircle className="h-8 w-8 text-mint-400/60" /><h2 className="mt-4 text-lg font-semibold text-white">Connect a wallet to open a table</h2><p className="mt-2 max-w-md text-sm leading-relaxed text-gray-500">The table UI becomes live after the Aleo session is authenticated.</p></div> : !table ? <><div className="flex items-center gap-3"><CheckCircle2 className="h-5 w-5 text-mint-400" /><h2 className="text-lg font-semibold text-white">Create a three-player table</h2></div><label className="mt-6 block text-xs font-mono uppercase tracking-wider text-gray-500" htmlFor="play-players">Player addresses</label><textarea id="play-players" rows={3} value={players} onChange={(event) => setPlayers(event.target.value)} className="mt-2 w-full resize-none rounded-xl border border-ink-600 bg-ink-900 px-3 py-3 font-mono text-xs text-gray-100 outline-none focus:border-mint-400" placeholder="aleo1…, aleo1…, aleo1…" /><button type="button" disabled={busy} onClick={() => void createTable()} className="btn-primary mt-3"><CheckCircle2 className="h-4 w-4" /> {busy ? "Preparing…" : "Create table"}</button><p className="mt-4 text-xs leading-relaxed text-gray-500">Exactly three unique addresses are required. On Testnet, your wallet will ask you to confirm `create_table_v1` before the table becomes playable.</p></> : <><div className="mb-5 flex flex-wrap items-center justify-between gap-3"><div><div className="font-mono text-[10px] uppercase tracking-[0.18em] text-gray-500">Live coordinator payload</div><h2 className="mt-1 text-lg font-semibold text-white">Table {short(table.id)}</h2></div><button type="button" disabled={busy} onClick={() => void refreshTable()} className="btn-ghost !px-3 !py-2 text-xs"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button></div><PokerTablePreview table={table} currentAddress={session.address} busy={busy} status={status} onAction={(kind, amount) => void play(kind, amount)} /></>}
+            {!session ? <div className="flex min-h-[420px] flex-col items-center justify-center text-center"><LoaderCircle className="h-8 w-8 text-mint-400/60" /><h2 className="mt-4 text-lg font-semibold text-white">Connect a wallet to open a table</h2><p className="mt-2 max-w-md text-sm leading-relaxed text-gray-500">The table UI becomes live after the Aleo session is authenticated.</p></div> : !table ? <div className="space-y-8">
+              <div>
+                <div className="flex items-center gap-3"><WalletCards className="h-5 w-5 text-mint-400" /><h2 className="text-lg font-semibold text-white">Enter an existing table</h2></div>
+                <p className="mt-2 text-sm leading-relaxed text-gray-500">A table creator gives the other wallets its ID. Loading it confirms whether this wallet is one of the three Aleo seats.</p>
+                <label className="mt-5 block text-xs font-mono uppercase tracking-wider text-gray-500" htmlFor="join-table-id">Table ID</label>
+                <div className="mt-2 flex flex-col gap-2 sm:flex-row"><input id="join-table-id" value={joinTableId} onChange={(event) => setJoinTableId(event.target.value)} className="min-w-0 flex-1 rounded-xl border border-ink-600 bg-ink-900 px-3 py-3 font-mono text-xs text-gray-100 outline-none focus:border-mint-400" placeholder="51c3…" /><button type="button" disabled={busy || !joinTableId.trim()} onClick={() => void joinExistingTable()} className="btn-ghost sm:shrink-0"><WalletCards className="h-4 w-4" /> {busy ? "Loading…" : "Enter table"}</button></div>
+              </div>
+              <div className="border-t border-ink-700/70 pt-7">
+                <div className="flex items-center gap-3"><CheckCircle2 className="h-5 w-5 text-mint-400" /><h2 className="text-lg font-semibold text-white">Create a three-player table</h2></div>
+                <label className="mt-5 block text-xs font-mono uppercase tracking-wider text-gray-500" htmlFor="play-players">Player addresses</label><textarea id="play-players" rows={3} value={players} onChange={(event) => setPlayers(event.target.value)} className="mt-2 w-full resize-none rounded-xl border border-ink-600 bg-ink-900 px-3 py-3 font-mono text-xs text-gray-100 outline-none focus:border-mint-400" placeholder="aleo1…, aleo1…, aleo1…" /><button type="button" disabled={busy} onClick={() => void createTable()} className="btn-primary mt-3"><CheckCircle2 className="h-4 w-4" /> {busy ? "Preparing…" : "Create table"}</button><p className="mt-4 text-xs leading-relaxed text-gray-500">Exactly three unique addresses are required. On Testnet, your wallet will ask you to confirm `create_table_v1`; those three addresses become the canonical seats.</p>
+              </div>
+            </div> : <><div className="mb-5 flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="font-mono text-[10px] uppercase tracking-[0.18em] text-gray-500">Live coordinator payload</div><h2 className="mt-1 text-lg font-semibold text-white">Table {short(table.id)}</h2><div className="mt-2 flex max-w-full items-center gap-2"><code className="min-w-0 break-all font-mono text-[10px] text-gray-500">{table.id}</code><button type="button" onClick={() => void copyTableId()} className="shrink-0 rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-ink-700 hover:text-white" title="Copy full table ID" aria-label="Copy full table ID"><Copy className="h-3.5 w-3.5" /></button></div><div className="mt-2 text-xs text-gray-400">{(() => { const seat = table.seats.find((candidate) => candidate.address === session.address); return seat ? `Wallet seated at Seat ${seat.seat + 1} · stack ${seat.stack}` : "This wallet is not seated at this table"; })()}</div></div><button type="button" disabled={busy} onClick={() => void refreshTable()} className="btn-ghost !px-3 !py-2 text-xs"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button></div><PokerTablePreview table={table} currentAddress={session.address} busy={busy} status={status} onAction={(kind, amount) => void play(kind, amount)} /></>}
           </div>
         </section>
       </div>
