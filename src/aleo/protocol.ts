@@ -1,8 +1,8 @@
 import initWasm, { AleoWasmClientPlayer } from 'client-wasm-aleo';
-import wasmUrl from 'client-wasm-aleo/client_wasm_aleo_bg.wasm?url';
 import type { AleoWallet } from './wallet';
 
 let initialized: Promise<unknown> | undefined;
+const wasmUrl = '/client_wasm_aleo_bg.wasm';
 
 function hex(bytes: ArrayBuffer): string {
   return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('');

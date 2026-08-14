@@ -109,11 +109,13 @@ export async function mockActionSignature(address: string, message: Uint8Array):
 
 function adapterWallet(adapter: ProvableAdapter): AleoWallet {
   const custodyProgram = import.meta.env.VITE_ALEO_CUSTODY_PROGRAM_ID as string | undefined;
-  const programs = custodyProgram && !custodyProgram.startsWith('mock.')
-    ? [custodyProgram]
-    : undefined;
+  const stateProgram = import.meta.env.VITE_ALEO_STATE_PROGRAM_ID as string | undefined
+    ?? 'zgame_poker_state_v1.aleo';
+  const programs = [...new Set([custodyProgram, stateProgram]
+    .filter((program): program is string => typeof program === 'string' && !program.startsWith('mock.'))
+  )];
   return {
-    connect: () => adapter.connect(Network.TESTNET, DecryptPermission.NoDecrypt, programs),
+    connect: () => adapter.connect(Network.TESTNET, DecryptPermission.NoDecrypt, programs.length ? programs : undefined),
     disconnect: () => adapter.disconnect(),
     signMessage: async (message) => signatureString(await adapter.signMessage(message)),
     execute: (request) => adapter.executeTransaction({
