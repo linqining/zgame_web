@@ -12,6 +12,7 @@ type PokerTablePreviewProps = {
   busy?: boolean;
   status?: string;
   onAction?: (kind: ActionKind, amount?: number) => void;
+  onConfirmCreation?: () => void;
   onRefresh?: () => void;
 };
 
@@ -79,6 +80,7 @@ export function PokerTablePreview({
   busy = false,
   status,
   onAction,
+  onConfirmCreation,
   onRefresh,
 }: PokerTablePreviewProps) {
   const [amount, setAmount] = useState(10);
@@ -87,6 +89,12 @@ export function PokerTablePreview({
   const seats = Array.from({ length: 5 }, (_, index) => table ? table.seats[index] : previewSeats[index]);
   const currentTurn = table ? table.current_turn : "mock:nova";
   const canAct = Boolean(table && currentAddress && currentTurn === currentAddress && !busy && onAction);
+  const canConfirmCreation = Boolean(
+    table?.chain_status === "prepared"
+      && onConfirmCreation
+      && currentAddress
+      && table.seats.some((seat) => seat.address === currentAddress),
+  );
 
   return (
     <div className="card overflow-hidden p-4 shadow-2xl sm:p-6">
@@ -152,7 +160,19 @@ export function PokerTablePreview({
         </div>
       </div>
 
-      {onAction ? (
+      {canConfirmCreation ? (
+        <div className="mt-4 rounded-xl border border-amber-300/25 bg-amber-300/[0.06] p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span className="text-xs text-amber-100">The table is waiting for its Aleo creation transaction.</span>
+            <button type="button" disabled={busy} onClick={onConfirmCreation} className="btn-primary !px-3 !py-2 text-xs disabled:cursor-not-allowed disabled:opacity-40"><Check className="h-3.5 w-3.5" /> Confirm table creation</button>
+          </div>
+        </div>
+      ) : table && table.chain_status !== "confirmed" && table.chain_status !== "mock" ? (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300/25 bg-amber-300/[0.06] p-3 text-xs text-amber-100">
+          <span>Creation transaction broadcast; waiting for Aleo finality.</span>
+          {onRefresh && <button type="button" disabled={busy} onClick={onRefresh} className="btn-ghost !px-3 !py-2 text-xs" title="Refresh table state"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button>}
+        </div>
+      ) : onAction ? (
         <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
           {availableActions.map((action) => (
             <button
@@ -192,7 +212,7 @@ export function PokerTablePreview({
         </div>
         <div className="col-span-2 rounded-xl border border-mint-500/20 bg-mint-500/[0.06] p-3 sm:col-span-1">
           <div className="font-mono text-[9px] uppercase tracking-wider text-gray-600">Settlement</div>
-          <div className="mt-1 flex items-center gap-1.5 font-semibold text-mint-300"><ShieldCheck className="h-3.5 w-3.5" /> {table?.chain_status === "confirmed" ? "Chain confirmed" : "Player approved"}</div>
+          <div className="mt-1 flex items-center gap-1.5 font-semibold text-mint-300"><ShieldCheck className="h-3.5 w-3.5" /> {table?.chain_status === "confirmed" ? "Chain confirmed" : table?.chain_status === "mock" ? "Player approved" : "Awaiting confirmation"}</div>
         </div>
       </div>
     </div>

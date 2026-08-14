@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { ArrowLeft, CheckCircle2, Copy, LoaderCircle, LogOut, RefreshCw, WalletCards } from "lucide-react";
 import {
   ZgameAleoApi,
@@ -42,6 +42,7 @@ export function AleoPlay() {
   const [joinTableId, setJoinTableId] = useState("");
   const [status, setStatus] = useState("Connect an Aleo wallet to start a private table");
   const [busy, setBusy] = useState(false);
+  const creationTracking = useRef(new Set<string>());
 
   const selectedWallet = () => {
     const selected = wallets.find((wallet) => wallet.id === walletId);
@@ -108,16 +109,7 @@ export function AleoPlay() {
       setTable(next);
       setTableId(next.id);
       if (next.creation_call) {
-        setStatus("Confirm the table creation transaction in your wallet…");
-        const transactionId = transactionIdFromWalletResult(await selectedWallet().execute({
-          program: next.creation_call.program,
-          function: next.creation_call.function,
-          inputs: next.creation_call.inputs,
-        }));
-        const submitted = await api.submitTableCreation(session, next.id, transactionId);
-        setTable(submitted.table);
-        setStatus(`Creation broadcast ${short(transactionId)} · waiting for Testnet finality`);
-        void trackTableCreation(session, next.id);
+        await submitTableCreation(session, next);
       } else {
         setStatus("Table created; the current-turn wallet can sign an action");
       }
@@ -128,22 +120,54 @@ export function AleoPlay() {
     }
   }
 
+  async function submitTableCreation(activeSession: AleoSession, activeTable: AleoTable) {
+    if (!activeTable.creation_call) return;
+    setStatus("Confirm the table creation transaction in your wallet…");
+    const transactionId = transactionIdFromWalletResult(await selectedWallet().execute({
+      program: activeTable.creation_call.program,
+      function: activeTable.creation_call.function,
+      inputs: activeTable.creation_call.inputs,
+    }));
+    const submitted = await api.submitTableCreation(activeSession, activeTable.id, transactionId);
+    setTable(submitted.table);
+    setStatus(`Creation broadcast ${short(transactionId)} · waiting for Testnet finality`);
+    void trackTableCreation(activeSession, activeTable.id);
+  }
+
+  async function confirmTableCreation() {
+    if (!session || !table) return;
+    setBusy(true);
+    try {
+      await submitTableCreation(session, table);
+    } catch (error) {
+      setStatus(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function trackTableCreation(activeSession: AleoSession, activeTableId: string) {
-    for (let attempt = 0; attempt < 900; attempt += 1) {
-      try {
-        const creation = await api.tableCreation(activeSession, activeTableId);
-        setTable(creation.table);
-        if (creation.status === "confirmed") {
-          setStatus(`Aleo table confirmed${creation.block_height ? ` at block ${creation.block_height}` : ""}`);
+    if (creationTracking.current.has(activeTableId)) return;
+    creationTracking.current.add(activeTableId);
+    try {
+      for (let attempt = 0; attempt < 900; attempt += 1) {
+        try {
+          const creation = await api.tableCreation(activeSession, activeTableId);
+          setTable(creation.table);
+          if (creation.status === "confirmed") {
+            setStatus(`Aleo table confirmed${creation.block_height ? ` at block ${creation.block_height}` : ""}`);
+            return;
+          }
+        } catch (error) {
+          setStatus(errorMessage(error));
           return;
         }
-      } catch (error) {
-        setStatus(errorMessage(error));
-        return;
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
       }
-      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      setStatus("Table creation is still confirming; refresh when ready");
+    } finally {
+      creationTracking.current.delete(activeTableId);
     }
-    setStatus("Table creation is still confirming; refresh when ready");
   }
 
   async function refreshTable() {
@@ -152,6 +176,11 @@ export function AleoPlay() {
     try {
       const next = await api.table(session, tableId);
       setTable(next);
+      if (next.chain_status === "submitted") {
+        setStatus("Table creation was broadcast; waiting for Testnet finality…");
+        void trackTableCreation(session, next.id);
+        return;
+      }
       setStatus("Authoritative table state refreshed");
     } catch (error) {
       setStatus(errorMessage(error));
@@ -177,7 +206,17 @@ export function AleoPlay() {
       setTable(next);
       setTableId(next.id);
       const seated = next.seats.some((seat) => seat.address === session.address);
-      setStatus(seated ? "Wallet seat confirmed; waiting for the current turn" : "Table loaded, but this wallet is not one of its seats");
+      if (!seated) {
+        setStatus("Table loaded, but this wallet is not one of its seats");
+      } else if (next.creation_call) {
+        setStatus("This table is waiting for its Aleo creation transaction");
+        await submitTableCreation(session, next);
+      } else if (next.chain_status === "submitted") {
+        setStatus("Table creation was broadcast; waiting for Testnet finality…");
+        void trackTableCreation(session, next.id);
+      } else {
+        setStatus("Wallet seat confirmed; waiting for the current turn");
+      }
     } catch (error) {
       setStatus(errorMessage(error));
     } finally {
@@ -304,7 +343,7 @@ export function AleoPlay() {
                 <div className="flex items-center gap-3"><CheckCircle2 className="h-5 w-5 text-mint-400" /><h2 className="text-lg font-semibold text-white">Create a three-player table</h2></div>
                 <label className="mt-5 block text-xs font-mono uppercase tracking-wider text-gray-500" htmlFor="play-players">Player addresses</label><textarea id="play-players" rows={3} value={players} onChange={(event) => setPlayers(event.target.value)} className="mt-2 w-full resize-none rounded-xl border border-ink-600 bg-ink-900 px-3 py-3 font-mono text-xs text-gray-100 outline-none focus:border-mint-400" placeholder="aleo1…, aleo1…, aleo1…" /><button type="button" disabled={busy} onClick={() => void createTable()} className="btn-primary mt-3"><CheckCircle2 className="h-4 w-4" /> {busy ? "Preparing…" : "Create table"}</button><p className="mt-4 text-xs leading-relaxed text-gray-500">Exactly three unique addresses are required. On Testnet, your wallet will ask you to confirm `create_table_v1`; those three addresses become the canonical seats.</p>
               </div>
-            </div> : <><div className="mb-5 flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="font-mono text-[10px] uppercase tracking-[0.18em] text-gray-500">Live coordinator payload</div><h2 className="mt-1 text-lg font-semibold text-white">Table {short(table.id)}</h2><div className="mt-2 flex max-w-full items-center gap-2"><code className="min-w-0 break-all font-mono text-[10px] text-gray-500">{table.id}</code><button type="button" onClick={() => void copyTableId()} className="shrink-0 rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-ink-700 hover:text-white" title="Copy full table ID" aria-label="Copy full table ID"><Copy className="h-3.5 w-3.5" /></button></div><div className="mt-2 text-xs text-gray-400">{(() => { const seat = table.seats.find((candidate) => candidate.address === session.address); return seat ? `Wallet seated at Seat ${seat.seat + 1} · stack ${seat.stack}` : "This wallet is not seated at this table"; })()}</div></div><button type="button" disabled={busy} onClick={() => void refreshTable()} className="btn-ghost !px-3 !py-2 text-xs"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button></div><PokerTablePreview table={table} currentAddress={session.address} busy={busy} status={status} onAction={(kind, amount) => void play(kind, amount)} /></>}
+            </div> : <><div className="mb-5 flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="font-mono text-[10px] uppercase tracking-[0.18em] text-gray-500">Live coordinator payload</div><h2 className="mt-1 text-lg font-semibold text-white">Table {short(table.id)}</h2><div className="mt-2 flex max-w-full items-center gap-2"><code className="min-w-0 break-all font-mono text-[10px] text-gray-500">{table.id}</code><button type="button" onClick={() => void copyTableId()} className="shrink-0 rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-ink-700 hover:text-white" title="Copy full table ID" aria-label="Copy full table ID"><Copy className="h-3.5 w-3.5" /></button></div><div className="mt-2 text-xs text-gray-400">{(() => { const seat = table.seats.find((candidate) => candidate.address === session.address); return seat ? `Wallet seated at Seat ${seat.seat + 1} · stack ${seat.stack}` : "This wallet is not seated at this table"; })()}</div></div><button type="button" disabled={busy} onClick={() => void refreshTable()} className="btn-ghost !px-3 !py-2 text-xs"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button></div><PokerTablePreview table={table} currentAddress={session.address} busy={busy} status={status} onAction={(kind, amount) => void play(kind, amount)} onConfirmCreation={() => void confirmTableCreation()} /></>}
           </div>
         </section>
       </div>
