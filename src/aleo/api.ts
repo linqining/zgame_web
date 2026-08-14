@@ -1,0 +1,212 @@
+import type { AleoWallet } from './wallet';
+
+export type AleoSession = {
+  address: string;
+  token: string;
+  expiresAt: number;
+};
+
+export type AleoProvingStatus = {
+  enabled: boolean;
+  workers: Array<{
+    relation: string;
+    state: string;
+    completed: number;
+    failed: number;
+    last_job?: string;
+    last_error?: string;
+  }>;
+  submission?: {
+    state: string;
+    prepared: number;
+    broadcast: number;
+    finalized: number;
+    failed: number;
+    last_job?: string;
+    last_transaction?: string;
+    last_error?: string;
+  };
+};
+
+export type AleoTable = {
+  id: string;
+  phase: 'betting' | 'reveal' | 'showdown_ready' | 'terminal';
+  hand_id: number;
+  call_seq: number;
+  street: number;
+  current_turn: string | null;
+  current_bet: number;
+  min_raise: number;
+  pot: number;
+  seats: Array<{
+    seat: number;
+    address: string;
+    stack: number;
+    bet: number;
+    total_bet: number;
+    folded: boolean;
+    all_in: boolean;
+  }>;
+  available_actions: Array<'check' | 'call' | 'fold' | 'bet' | 'raise'>;
+  last_job?: string;
+  chain_status: 'mock' | 'prepared' | 'submitted' | 'confirmed';
+  creation_call?: {
+    program: string;
+    function: string;
+    inputs: string[];
+  };
+};
+
+export type AleoTableCreation = {
+  status: 'prepared' | 'submitted' | 'confirmed';
+  transaction_id?: string;
+  block_height?: number;
+  table: AleoTable;
+};
+
+export type AleoJob = {
+  job_id: string;
+  relation: string;
+  status: string;
+  error?: string;
+  transaction_id?: string;
+  finalized_block_height?: number;
+};
+
+export function hexBytes(value: string): Uint8Array {
+  if (!/^(?:[0-9a-fA-F]{2})*$/.test(value)) {
+    throw new Error('Aleo action message is not valid hexadecimal');
+  }
+  return Uint8Array.from(value.match(/.{2}/g) ?? [], (byte) => Number.parseInt(byte, 16));
+}
+
+type Challenge = {
+  address: string;
+  nonce: string;
+  statement: string;
+  expires_at: number;
+};
+
+export class ZgameAleoApi {
+  constructor(private readonly baseUrl: string) {}
+
+  async authenticate(wallet: AleoWallet, address: string): Promise<AleoSession> {
+    const challenge = await this.request<Challenge>('/api/aleo/auth/challenge', {
+      method: 'POST',
+      body: JSON.stringify({ address }),
+    });
+    if (challenge.address !== address) {
+      throw new Error('Aleo service challenge returned another wallet address');
+    }
+    const signature = await wallet.signMessage(new TextEncoder().encode(challenge.statement));
+    const session = await this.request<{
+      address: string;
+      token: string;
+      expires_at: number;
+    }>('/api/aleo/auth/session', {
+      method: 'POST',
+      body: JSON.stringify({ address, nonce: challenge.nonce, signature }),
+    });
+    if (session.address !== address) {
+      throw new Error('Aleo service session returned another wallet address');
+    }
+    return {
+      address,
+      token: session.token,
+      expiresAt: session.expires_at,
+    };
+  }
+
+  currentSession(session: AleoSession): Promise<{ address: string; expires_at: number }> {
+    return this.request('/api/aleo/auth/me', {
+      headers: { Authorization: `Bearer ${session.token}` },
+    });
+  }
+
+  provingStatus(session: AleoSession): Promise<AleoProvingStatus> {
+    return this.request('/api/aleo/proving', {
+      headers: { Authorization: `Bearer ${session.token}` },
+    });
+  }
+
+  createTable(session: AleoSession, players: string[]): Promise<AleoTable> {
+    return this.request('/api/aleo/tables', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${session.token}` },
+      body: JSON.stringify({ players }),
+    });
+  }
+
+  table(session: AleoSession, tableId: string): Promise<AleoTable> {
+    return this.request(`/api/aleo/tables/${encodeURIComponent(tableId)}`, {
+      headers: { Authorization: `Bearer ${session.token}` },
+    });
+  }
+
+  submitTableCreation(
+    session: AleoSession,
+    tableId: string,
+    transactionId: string,
+  ): Promise<AleoTableCreation> {
+    return this.request(`/api/aleo/tables/${encodeURIComponent(tableId)}/creation`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${session.token}` },
+      body: JSON.stringify({ transaction_id: transactionId }),
+    });
+  }
+
+  tableCreation(session: AleoSession, tableId: string): Promise<AleoTableCreation> {
+    return this.request(`/api/aleo/tables/${encodeURIComponent(tableId)}/creation`, {
+      headers: { Authorization: `Bearer ${session.token}` },
+    });
+  }
+
+  async submitAction(
+    session: AleoSession,
+    wallet: AleoWallet,
+    tableId: string,
+    kind: 'check' | 'call' | 'fold' | 'bet' | 'raise',
+    amount?: number,
+  ): Promise<{ job_id: string; status: string; table: AleoTable }> {
+    const preview = await this.request<{
+      preview_id: string;
+      relation: string;
+      message_hex: string;
+      expires_at: number;
+    }>(`/api/aleo/tables/${encodeURIComponent(tableId)}/actions/preview`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${session.token}` },
+      body: JSON.stringify({ kind, amount }),
+    });
+    const signature = await wallet.signMessage(hexBytes(preview.message_hex));
+    return this.request(`/api/aleo/tables/${encodeURIComponent(tableId)}/actions/submit`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${session.token}` },
+      body: JSON.stringify({ preview_id: preview.preview_id, signature }),
+    });
+  }
+
+  job(session: AleoSession, jobId: string): Promise<AleoJob> {
+    return this.request(`/api/aleo/jobs/${encodeURIComponent(jobId)}`, {
+      headers: { Authorization: `Bearer ${session.token}` },
+    });
+  }
+
+  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const response = await fetch(`${this.baseUrl.replace(/\/$/, '')}${path}`, {
+      ...init,
+      headers: { 'content-type': 'application/json', ...init.headers },
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      let message = text || `Aleo service request failed (${response.status})`;
+      try {
+        message = (JSON.parse(text) as { error?: string }).error || message;
+      } catch {
+        // Preserve a useful non-JSON server error.
+      }
+      throw new Error(message);
+    }
+    return JSON.parse(text) as T;
+  }
+}

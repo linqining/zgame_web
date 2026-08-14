@@ -25,3 +25,4 @@ vin_game_simulator/keys.json
 **/keys.json
 
 client/deploy/*
+dist/*

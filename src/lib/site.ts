@@ -5,6 +5,7 @@ export const site = {
     zgame: "https://github.com/linqining/zgame",
     zchain: "https://github.com/linqining/zchain",
     protocol: "#/protocol",
+    play: "#/play",
     status: "#status",
   },
 };

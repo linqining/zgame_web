@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Menu, X, Activity, BookOpen } from "lucide-react";
+import { Menu, X, Activity, BookOpen, Play } from "lucide-react";
 import { navLinks, site } from "../lib/site";
 import { LogoMark } from "./Logo";
 
@@ -43,6 +43,10 @@ export function Nav() {
         </div>
 
         <div className="hidden items-center gap-3 md:flex">
+          <a href={site.links.play} className="btn-primary px-4 py-2 text-xs">
+            <Play className="h-3.5 w-3.5" />
+            Play
+          </a>
           <a href={site.links.protocol} className="btn-ghost px-4 py-2 text-xs">
             <BookOpen className="h-3.5 w-3.5" />
             Protocol
@@ -80,6 +84,10 @@ export function Nav() {
               className="btn-primary mt-2 w-full"
             >
               Read protocol overview
+            </a>
+            <a href={site.links.play} className="btn-primary mt-2 w-full" onClick={() => setOpen(false)}>
+              <Play className="h-4 w-4" />
+              Play on Aleo
             </a>
           </div>
         </div>

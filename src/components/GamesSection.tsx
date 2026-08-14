@@ -1,4 +1,4 @@
-import { EyeOff, RefreshCw, Hand, CheckCircle2, LockKeyhole } from "lucide-react";
+import { EyeOff, RefreshCw, Hand, CheckCircle2, LockKeyhole, Play } from "lucide-react";
 import { Reveal, RevealStagger, RevealItem } from "./Reveal";
 import { PokerTablePreview } from "./PokerTablePreview";
 
@@ -63,6 +63,11 @@ export function GamesSection() {
                 <CheckCircle2 className="h-4 w-4 text-mint-400" /> Exact settlement approvals
               </div>
             </div>
+
+            <a href="#/play" className="btn-primary mt-8 w-fit">
+              <Play className="h-4 w-4" />
+              Play on Aleo
+            </a>
           </Reveal>
 
           {/* Ported from zgame/client: the actual five-seat felt table and action HUD. */}

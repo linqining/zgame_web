@@ -12,6 +12,7 @@ import { Whitepaper } from "./components/Whitepaper";
 import { WhitepaperDoc } from "./components/WhitepaperDoc";
 import { Community } from "./components/Community";
 import { Footer } from "./components/Footer";
+import { AleoPlay } from "./components/AleoPlay";
 
 function useHashRoute() {
   const [hash, setHash] = useState(() => window.location.hash);
@@ -26,12 +27,23 @@ function useHashRoute() {
 export default function App() {
   const hash = useHashRoute();
   const isWhitepaper = hash.startsWith("#/protocol") || hash.startsWith("#/whitepaper");
+  const isPlay = hash.startsWith("#/play");
 
   if (isWhitepaper) {
     return (
       <>
         <Nav />
         <WhitepaperDoc />
+        <Footer />
+      </>
+    );
+  }
+
+  if (isPlay) {
+    return (
+      <>
+        <Nav />
+        <AleoPlay />
         <Footer />
       </>
     );
