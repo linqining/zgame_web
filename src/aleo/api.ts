@@ -143,15 +143,13 @@ export class ZgameAleoApi {
     });
   }
 
-  submitTableCreation(
+  submitTableCreationByExecutor(
     session: AleoSession,
     tableId: string,
-    transactionId: string,
   ): Promise<AleoTableCreation> {
-    return this.request(`/api/aleo/tables/${encodeURIComponent(tableId)}/creation`, {
+    return this.request(`/api/aleo/tables/${encodeURIComponent(tableId)}/creation/executor`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${session.token}` },
-      body: JSON.stringify({ transaction_id: transactionId }),
     });
   }
 
