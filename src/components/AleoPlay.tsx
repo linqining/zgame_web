@@ -29,6 +29,18 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function savedTableKey(address: string) {
+  return `zgame-aleo:last-table:${address}`;
+}
+
+function rememberedTableId(address: string) {
+  return window.localStorage.getItem(savedTableKey(address))?.trim() || "";
+}
+
+function rememberTable(address: string, tableId: string) {
+  window.localStorage.setItem(savedTableKey(address), tableId);
+}
+
 export function AleoPlay() {
   const wallets = useMemo(walletOptions, []);
   const [walletId, setWalletId] = useState(wallets.find((wallet) => wallet.installed)?.id ?? "");
@@ -68,6 +80,25 @@ export function AleoPlay() {
       setProtocolKey(protocol.publicKeyHex);
       setProving(provingStatus);
       setPlayers((current) => current || mockPlayers(address));
+      const savedTableId = rememberedTableId(address);
+      if (savedTableId) {
+        setStatus("Restoring your last table…");
+        try {
+          const savedTable = await api.table(nextSession, savedTableId);
+          setTable(savedTable);
+          setTableId(savedTable.id);
+          rememberTable(address, savedTable.id);
+          if (savedTable.chain_status === "submitted") {
+            setStatus("Saved table creation was broadcast; waiting for Testnet finality…");
+            void trackTableCreation(nextSession, savedTable.id);
+          } else {
+            setStatus("Restored your saved Aleo table");
+          }
+          return;
+        } catch {
+          window.localStorage.removeItem(savedTableKey(address));
+        }
+      }
       setStatus("Wallet, session and protocol player ready");
     } catch (error) {
       setStatus(errorMessage(error));
@@ -108,6 +139,7 @@ export function AleoPlay() {
       const next = await api.createTable(session, addresses);
       setTable(next);
       setTableId(next.id);
+      rememberTable(session.address, next.id);
       if (next.creation_call) {
         await submitTableCreationByExecutor(session, next);
       } else {
@@ -200,6 +232,7 @@ export function AleoPlay() {
       const next = await api.table(session, requestedId);
       setTable(next);
       setTableId(next.id);
+      rememberTable(session.address, next.id);
       const seated = next.seats.some((seat) => seat.address === session.address);
       if (!seated) {
         setStatus("Table loaded, but this wallet is not one of its seats");
