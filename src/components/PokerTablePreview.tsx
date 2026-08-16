@@ -92,10 +92,13 @@ export function PokerTablePreview({
 }: PokerTablePreviewProps) {
   const [amount, setAmount] = useState(10);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000) + serverTimeOffsetSeconds);
-  const seats = Array.from({ length: 5 }, (_, index) => table?.seats[index]);
+  const seats = Array.from({ length: 5 }, (_, index) => {
+    const seat = table?.seats[index];
+    return seat?.address ? seat : undefined;
+  });
   const currentTurn = table?.current_turn;
   const currentTurnSeat = currentTurn ? seats.find((seat) => seat?.address === currentTurn) : undefined;
-  const ownSeat = table?.seats.find((seat) => seat.address === currentAddress);
+  const ownSeat = table?.seats.find((seat) => seat.address && seat.address === currentAddress);
   const callAmount = Math.min(ownSeat?.stack ?? 0, Math.max(0, (table?.current_bet ?? 0) - (ownSeat?.bet ?? 0)));
   const isOwnTurn = Boolean(currentAddress && currentTurn === currentAddress);
   const timeoutAt = currentTurn && table?.phase === "betting"

@@ -26,3 +26,4 @@ vin_game_simulator/keys.json
 
 client/deploy/*
 dist/*
+.codex-deploy/
