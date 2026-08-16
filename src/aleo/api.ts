@@ -9,6 +9,7 @@ export type AleoSession = {
 export type AleoProvingStatus = {
   enabled: boolean;
   gameplay_mode: 'server' | 'proof';
+  server_turn_timeout_seconds?: number;
   workers: Array<{
     relation: string;
     state: string;
@@ -39,6 +40,8 @@ export type AleoTable = {
   current_bet: number;
   min_raise: number;
   pot: number;
+  community: number[];
+  hole_cards?: [number, number];
   seats: Array<{
     seat: number;
     address: string;
@@ -47,6 +50,8 @@ export type AleoTable = {
     total_bet: number;
     folded: boolean;
     all_in: boolean;
+    leaving: boolean;
+    left: boolean;
   }>;
   available_actions: Array<'check' | 'call' | 'fold' | 'bet' | 'raise'>;
   last_job?: string;
@@ -65,6 +70,33 @@ export type AleoTable = {
     transaction_id?: string;
     error?: string;
   };
+  leaves: AleoLeave[];
+  turn_started_at: number;
+};
+
+export type AleoLeave = {
+  seat: number;
+  address: string;
+  requested_hand_id: number;
+  amount?: number;
+  status: 'requested' | 'ready' | 'pending' | 'submitted' | 'confirmed' | 'failed';
+  transaction_id?: string;
+  error?: string;
+};
+
+export type AleoTableEvent = {
+  event: 'connected' | 'table' | 'heartbeat' | 'error';
+  table?: AleoTable;
+  error?: string;
+  server_time?: number;
+  server_turn_timeout_seconds?: number;
+};
+
+export type AleoLobbyEvent = {
+  event: 'connected' | 'lobby' | 'heartbeat' | 'error';
+  tables?: AleoTable[];
+  error?: string;
+  server_time?: number;
 };
 
 export type AleoTableCreation = {
@@ -155,6 +187,30 @@ export class ZgameAleoApi {
 
   table(session: AleoSession, tableId: string): Promise<AleoTable> {
     return this.request(`/api/aleo/tables/${encodeURIComponent(tableId)}`, {
+      headers: { Authorization: `Bearer ${session.token}` },
+    });
+  }
+
+  tableEvents(session: AleoSession, tableId: string): WebSocket {
+    const endpoint = new URL(`/api/aleo/tables/${encodeURIComponent(tableId)}/events`, this.baseUrl);
+    endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:';
+    // The WebSocket API cannot attach Authorization headers. The session token
+    // travels in a negotiated subprotocol instead of a URL query parameter.
+    return new WebSocket(endpoint.toString(), ['zgame', session.token]);
+  }
+
+  lobbyEvents(session: AleoSession): WebSocket {
+    const endpoint = new URL('/api/aleo/tables/events', this.baseUrl);
+    endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:';
+    return new WebSocket(endpoint.toString(), ['zgame', session.token]);
+  }
+
+  leaveTable(
+    session: AleoSession,
+    tableId: string,
+  ): Promise<{ table_id: string; leave: AleoLeave; table: AleoTable }> {
+    return this.request(`/api/aleo/tables/${encodeURIComponent(tableId)}/leave`, {
+      method: 'POST',
       headers: { Authorization: `Bearer ${session.token}` },
     });
   }

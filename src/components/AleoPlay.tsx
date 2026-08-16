@@ -3,8 +3,10 @@ import { ArrowLeft, CheckCircle2, CircleDot, Copy, LayoutDashboard, LoaderCircle
 import {
   ZgameAleoApi,
   type AleoProvingStatus,
+  type AleoLobbyEvent,
   type AleoSession,
   type AleoTable,
+  type AleoTableEvent,
 } from "../aleo/api";
 import { connectedAddress, walletOptions } from "../aleo/wallet";
 import { PokerTablePreview } from "./PokerTablePreview";
@@ -80,8 +82,13 @@ export function AleoPlay() {
   const [joinTableId, setJoinTableId] = useState("");
   const [status, setStatus] = useState("Connect an Aleo wallet to start a private table");
   const [busy, setBusy] = useState(false);
+  const [realtimeState, setRealtimeState] = useState<"offline" | "connecting" | "live">("offline");
+  const [serverTimeOffsetSeconds, setServerTimeOffsetSeconds] = useState(0);
   const creationTracking = useRef(new Set<string>());
   const restoredSession = useRef(false);
+  // A closing WebSocket can still have a buffered table event. This identity
+  // makes leaving the table authoritative from the browser's perspective.
+  const activeTableId = useRef("");
 
   const selectedWallet = () => {
     const selected = wallets.find((wallet) => wallet.id === walletId);
@@ -105,6 +112,21 @@ export function AleoPlay() {
 
   function upsertLobbyTable(next: AleoTable) {
     setLobbyTables((current) => [next, ...current.filter((candidate) => candidate.id !== next.id)]);
+  }
+
+  function applyTableSnapshot(next: AleoTable) {
+    setTable((current) => {
+      if (!current || current.id !== next.id) return next;
+      if (next.hand_id < current.hand_id) return current;
+      if (next.hand_id === current.hand_id && next.call_seq < current.call_seq) return current;
+      return next;
+    });
+    upsertLobbyTable(next);
+  }
+
+  function updateServerClock(serverTime?: number) {
+    if (serverTime === undefined) return;
+    setServerTimeOffsetSeconds(serverTime - Math.floor(Date.now() / 1000));
   }
 
   async function restoreSavedTable(activeSession: AleoSession): Promise<boolean> {
@@ -159,6 +181,122 @@ export function AleoPlay() {
       }
     })();
   }, []);
+
+  useEffect(() => {
+    if (!session || !tableId) {
+      setRealtimeState("offline");
+      return;
+    }
+    let closed = false;
+    let socket: WebSocket | undefined;
+    let retry: number | undefined;
+    let attempt = 0;
+    const scheduleReconnect = () => {
+      if (closed) return;
+      if (session.expiresAt <= Date.now() / 1000) {
+        window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+        setSession(undefined);
+        setTable(undefined);
+        setTableId("");
+        setRealtimeState("offline");
+        setStatus("Wallet session expired; reconnect to continue");
+        return;
+      }
+      const delay = Math.min(30_000, 1_000 * (2 ** attempt)) + Math.floor(Math.random() * 500);
+      attempt = Math.min(attempt + 1, 5);
+      retry = window.setTimeout(connect, delay);
+    };
+    const connect = () => {
+      if (closed) return;
+      setRealtimeState("connecting");
+      socket = api.tableEvents(session, tableId);
+      socket.onopen = () => {
+        if (!closed) {
+          attempt = 0;
+          setRealtimeState("live");
+        }
+      };
+      socket.onmessage = (message) => {
+        if (closed || activeTableId.current !== tableId) return;
+        try {
+          const event = JSON.parse(message.data) as AleoTableEvent;
+          updateServerClock(event.server_time);
+          if ((event.event === "connected" || event.event === "table") && event.table?.id === tableId) {
+            applyTableSnapshot(event.table);
+          } else if (event.event === "error" && event.error) {
+            setStatus(event.error);
+          }
+        } catch {
+          // Ignore malformed transient messages and keep the last valid state.
+        }
+      };
+      socket.onclose = () => {
+        if (closed) return;
+        setRealtimeState("offline");
+        scheduleReconnect();
+      };
+      socket.onerror = () => socket?.close();
+    };
+    connect();
+    return () => {
+      closed = true;
+      if (retry) window.clearTimeout(retry);
+      socket?.close();
+    };
+  }, [session, tableId]);
+
+  useEffect(() => {
+    if (!session) return;
+    let closed = false;
+    let socket: WebSocket | undefined;
+    let retry: number | undefined;
+    let attempt = 0;
+    const connectLobby = () => {
+      if (closed || session.expiresAt <= Date.now() / 1000) return;
+      socket = api.lobbyEvents(session);
+      socket.onopen = () => { attempt = 0; };
+      socket.onmessage = (message) => {
+        if (closed) return;
+        try {
+          const event = JSON.parse(message.data) as AleoLobbyEvent;
+          updateServerClock(event.server_time);
+          if ((event.event === "connected" || event.event === "lobby") && event.tables) {
+            setLobbyTables(event.tables);
+          }
+        } catch {
+          // Keep the last valid lobby snapshot.
+        }
+      };
+      socket.onclose = () => {
+        if (closed || session.expiresAt <= Date.now() / 1000) return;
+        const delay = Math.min(30_000, 1_000 * (2 ** attempt)) + Math.floor(Math.random() * 500);
+        attempt = Math.min(attempt + 1, 5);
+        retry = window.setTimeout(connectLobby, delay);
+      };
+      socket.onerror = () => socket?.close();
+    };
+    connectLobby();
+    return () => {
+      closed = true;
+      if (retry) window.clearTimeout(retry);
+      socket?.close();
+    };
+  }, [session]);
+
+  useEffect(() => {
+    activeTableId.current = tableId;
+  }, [tableId]);
+
+  useEffect(() => {
+    if (!session) {
+      document.title = "ZGame — Private Poker on Aleo";
+      return;
+    }
+    const seat = table?.seats.find((candidate) => candidate.address === session.address);
+    const role = seat ? `Seat ${seat.seat + 1}` : "Spectator";
+    const turn = table?.current_turn === session.address ? " · YOUR TURN" : "";
+    document.title = `ZGame · ${role} · ${short(session.address)}${turn}`;
+  }, [session, table]);
 
   async function connect() {
     setBusy(true);
@@ -360,6 +498,8 @@ export function AleoPlay() {
   }
 
   function changeTable() {
+    activeTableId.current = "";
+    if (session) window.localStorage.removeItem(savedTableKey(session.address));
     setTable(undefined);
     setTableId("");
     setStatus("Back in the lobby");
@@ -378,14 +518,55 @@ export function AleoPlay() {
       }
       setStatus(`Submitting ${kind} to the game server…`);
       const result = await api.serverAction(session, table.id, kind, amount);
-      setTable(result.table);
-      upsertLobbyTable(result.table);
+      applyTableSnapshot(result.table);
       setStatus(`Server action applied · ${result.status}`);
     } catch (error) {
       setStatus(errorMessage(error));
     } finally {
       setBusy(false);
     }
+  }
+
+  async function leaveTable() {
+    if (!session || !table) return;
+    setBusy(true);
+    setStatus("Leaving the table and preparing the Aleo cash-out receipt…");
+    try {
+      const result = await api.leaveTable(session, table.id);
+      applyTableSnapshot(result.table);
+      window.localStorage.removeItem(savedTableKey(session.address));
+      const amount = result.leave.amount;
+      setStatus(amount === undefined
+        ? "Leave requested; cash-out will finalize after this hand"
+        : `Cash-out ${amount} · Aleo receipt ${result.leave.status}`);
+    } catch (error) {
+      setStatus(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // A seated table intentionally takes over the viewport, matching the
+  // established Secret Poker play scene. Lobby and wallet management remain
+  // available through the floating Lobby control rather than competing with
+  // the active table for screen space.
+  if (session && table) {
+    return (
+      <PokerTablePreview
+        table={table}
+        currentAddress={session.address}
+        busy={busy}
+        status={status}
+        liveState={realtimeState}
+        turnTimeoutSeconds={proving?.server_turn_timeout_seconds ?? 20}
+        serverTimeOffsetSeconds={serverTimeOffsetSeconds}
+        onAction={(kind, amount) => void play(kind, amount)}
+        onConfirmCreation={() => void confirmTableCreation()}
+        onRefresh={() => void refreshTable()}
+        onLobby={changeTable}
+        onLeave={() => void leaveTable()}
+      />
+    );
   }
 
   return (
@@ -413,7 +594,7 @@ export function AleoPlay() {
             )}
             <div className="mt-4 flex items-start gap-2 rounded-xl border border-ink-700 bg-ink-900/70 p-3 text-xs text-gray-400"><span className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-mint-400" /><span>{status}</span></div>
             {provingError && <div className="mt-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200">Game backend mode unavailable: {provingError}</div>}
-            {session && <dl className="mt-5 space-y-3 text-xs"><div><dt className="font-mono uppercase tracking-wider text-gray-600">Wallet</dt><dd className="mt-1 break-all text-gray-200">{walletAddress}</dd></div><div><dt className="font-mono uppercase tracking-wider text-gray-600">Gameplay</dt><dd className="mt-1 text-gray-200">Server-authoritative</dd></div><div><dt className="font-mono uppercase tracking-wider text-gray-600">Gameplay proofs</dt><dd className="mt-1 text-gray-200">{proving?.gameplay_mode === "server" ? "Not used — actions stay off-chain" : "Backend mode unavailable"}</dd></div></dl>}
+            {session && <dl className="mt-5 space-y-3 text-xs"><div><dt className="font-mono uppercase tracking-wider text-gray-600">Wallet</dt><dd className="mt-1 break-all text-gray-200">{walletAddress}</dd></div><div><dt className="font-mono uppercase tracking-wider text-gray-600">Gameplay</dt><dd className="mt-1 text-gray-200">Server-authoritative</dd></div><div><dt className="font-mono uppercase tracking-wider text-gray-600">Live sync</dt><dd className={`mt-1 font-semibold ${realtimeState === "live" ? "text-mint-300" : "text-amber-200"}`}>{realtimeState === "live" ? "WebSocket connected" : realtimeState === "connecting" ? "Connecting…" : "Waiting for a table"}</dd></div><div><dt className="font-mono uppercase tracking-wider text-gray-600">Gameplay proofs</dt><dd className="mt-1 text-gray-200">{proving?.gameplay_mode === "server" ? "Not used — actions stay off-chain" : "Backend mode unavailable"}</dd></div></dl>}
           </div>
 
           <div className="card p-5 sm:p-6">
@@ -430,7 +611,7 @@ export function AleoPlay() {
                 <details className="rounded-2xl border border-ink-700 bg-ink-900/50 p-4"><summary className="cursor-pointer text-sm font-semibold text-gray-200">Open a table by ID</summary><label className="mt-4 block text-xs font-mono uppercase tracking-wider text-gray-500" htmlFor="join-table-id">Table ID</label><div className="mt-2 flex flex-col gap-2 sm:flex-row"><input id="join-table-id" value={joinTableId} onChange={(event) => setJoinTableId(event.target.value)} className="min-w-0 flex-1 rounded-xl border border-ink-600 bg-ink-900 px-3 py-3 font-mono text-xs text-gray-100 outline-none focus:border-mint-400" placeholder="51c3…" /><button type="button" disabled={busy || !joinTableId.trim()} onClick={() => void joinExistingTable()} className="btn-ghost sm:shrink-0"><WalletCards className="h-4 w-4" /> Open</button></div></details>
                 <div className="border-t border-ink-700/70 pt-7"><div className="flex items-center gap-3"><Plus className="h-5 w-5 text-mint-400" /><h2 className="text-lg font-semibold text-white">Create a three-player table</h2></div><label className="mt-5 block text-xs font-mono uppercase tracking-wider text-gray-500" htmlFor="play-players">Player addresses</label><textarea id="play-players" rows={3} value={players} onChange={(event) => setPlayers(event.target.value)} className="mt-2 w-full resize-none rounded-xl border border-ink-600 bg-ink-900 px-3 py-3 font-mono text-xs text-gray-100 outline-none focus:border-mint-400" placeholder="aleo1…, aleo1…, aleo1…" /><button type="button" disabled={busy} onClick={() => void createTable()} className="btn-primary mt-3"><CheckCircle2 className="h-4 w-4" /> {busy ? "Preparing…" : "Create table"}</button><p className="mt-4 text-xs leading-relaxed text-gray-500">Exactly three unique addresses are required. The table is added to this lobby immediately; only buy-in/genesis and final settlement cross the chain boundary.</p></div>
               </div>
-            ) : <><div className="mb-5 flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="font-mono text-[10px] uppercase tracking-[0.18em] text-gray-500">Live table state</div><h2 className="mt-1 text-lg font-semibold text-white">Table {short(table.id)}</h2><div className="mt-2 flex max-w-full items-center gap-2"><code className="min-w-0 break-all font-mono text-[10px] text-gray-500">{table.id}</code><button type="button" onClick={() => void copyTableId()} className="shrink-0 rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-ink-700 hover:text-white" title="Copy full table ID" aria-label="Copy full table ID"><Copy className="h-3.5 w-3.5" /></button></div><div className="mt-2 text-xs text-gray-400">{(() => { const seat = table.seats.find((candidate) => candidate.address === session.address); return seat ? `Wallet seated at Seat ${seat.seat + 1} · stack ${seat.stack}` : "This wallet is not seated at this table"; })()}</div></div><div className="flex gap-2"><button type="button" disabled={busy} onClick={changeTable} className="btn-ghost !px-3 !py-2 text-xs"><LayoutDashboard className="h-3.5 w-3.5" /> Lobby</button><button type="button" disabled={busy} onClick={() => void refreshTable()} className="btn-ghost !px-3 !py-2 text-xs"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button></div></div><PokerTablePreview table={table} currentAddress={session.address} busy={busy} status={status} onAction={(kind, amount) => void play(kind, amount)} onConfirmCreation={() => void confirmTableCreation()} onRefresh={() => void refreshTable()} /></>}
+            ) : <><div className="mb-5 flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="font-mono text-[10px] uppercase tracking-[0.18em] text-gray-500">Live table state · {realtimeState === "live" ? "WebSocket live" : "reconnecting"}</div><h2 className="mt-1 text-lg font-semibold text-white">Table {short(table.id)}</h2><div className="mt-2 flex max-w-full items-center gap-2"><code className="min-w-0 break-all font-mono text-[10px] text-gray-500">{table.id}</code><button type="button" onClick={() => void copyTableId()} className="shrink-0 rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-ink-700 hover:text-white" title="Copy full table ID" aria-label="Copy full table ID"><Copy className="h-3.5 w-3.5" /></button></div><div className="mt-2 text-xs text-gray-400">{(() => { const seat = table.seats.find((candidate) => candidate.address === session.address); return seat ? <span className="font-semibold text-mint-300">This browser is Seat {seat.seat + 1} · {short(session.address)} · stack {seat.stack}</span> : "This wallet is not seated at this table"; })()}</div></div><div className="flex gap-2"><button type="button" onClick={changeTable} className="btn-ghost !px-3 !py-2 text-xs"><LayoutDashboard className="h-3.5 w-3.5" /> Lobby</button><button type="button" disabled={busy} onClick={() => void refreshTable()} className="btn-ghost !px-3 !py-2 text-xs"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button></div></div><PokerTablePreview table={table} currentAddress={session.address} busy={busy} status={status} turnTimeoutSeconds={proving?.server_turn_timeout_seconds ?? 20} onAction={(kind, amount) => void play(kind, amount)} onConfirmCreation={() => void confirmTableCreation()} onRefresh={() => void refreshTable()} /></>}
           </div>
         </section>
       </div>
