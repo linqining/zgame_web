@@ -1,18 +1,22 @@
-import { useMemo, useRef, useState } from "react";
-import { ArrowLeft, CheckCircle2, Copy, LoaderCircle, LogOut, RefreshCw, WalletCards } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, CheckCircle2, CircleDot, Copy, LayoutDashboard, LoaderCircle, LogOut, Plus, RefreshCw, Users, WalletCards } from "lucide-react";
 import {
   ZgameAleoApi,
-  type AleoJob,
   type AleoProvingStatus,
   type AleoSession,
   type AleoTable,
 } from "../aleo/api";
-import { initializeProtocolPlayer } from "../aleo/protocol";
 import { connectedAddress, walletOptions } from "../aleo/wallet";
 import { PokerTablePreview } from "./PokerTablePreview";
 
 const api = new ZgameAleoApi(import.meta.env.VITE_ZGAME_ALEO_API ?? "http://127.0.0.1:9011");
 type ActionKind = "check" | "call" | "fold" | "bet" | "raise";
+const SESSION_STORAGE_KEY = "zgame-aleo:browser-session:v1";
+
+type StoredSession = {
+  walletId: string;
+  session: AleoSession;
+};
 
 function mockPlayers(address: string) {
   if (!address.startsWith("mock:")) return address;
@@ -41,20 +45,43 @@ function rememberTable(address: string, tableId: string) {
   window.localStorage.setItem(savedTableKey(address), tableId);
 }
 
+function loadStoredSession(): StoredSession | undefined {
+  try {
+    const stored = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+    if (!stored) return undefined;
+    const value = JSON.parse(stored) as StoredSession;
+    if (!value.walletId || !value.session?.address || !value.session.token || value.session.expiresAt <= Date.now() / 1000) {
+      window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      return undefined;
+    }
+    return value;
+  } catch {
+    window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    return undefined;
+  }
+}
+
+function storeSession(walletId: string, session: AleoSession) {
+  window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ walletId, session }));
+}
+
 export function AleoPlay() {
   const wallets = useMemo(walletOptions, []);
   const [walletId, setWalletId] = useState(wallets.find((wallet) => wallet.installed)?.id ?? "");
   const [walletAddress, setWalletAddress] = useState("");
   const [session, setSession] = useState<AleoSession>();
-  const [protocolKey, setProtocolKey] = useState("");
   const [proving, setProving] = useState<AleoProvingStatus>();
+  const [provingError, setProvingError] = useState("");
   const [players, setPlayers] = useState("");
   const [table, setTable] = useState<AleoTable>();
+  const [lobbyTables, setLobbyTables] = useState<AleoTable[]>([]);
+  const [lobbyLoading, setLobbyLoading] = useState(false);
   const [tableId, setTableId] = useState("");
   const [joinTableId, setJoinTableId] = useState("");
   const [status, setStatus] = useState("Connect an Aleo wallet to start a private table");
   const [busy, setBusy] = useState(false);
   const creationTracking = useRef(new Set<string>());
+  const restoredSession = useRef(false);
 
   const selectedWallet = () => {
     const selected = wallets.find((wallet) => wallet.id === walletId);
@@ -62,6 +89,76 @@ export function AleoPlay() {
     if (!selected.installed) throw new Error(`${selected.name} is not installed`);
     return selected.wallet;
   };
+
+  async function refreshLobby(activeSession: AleoSession, announce = false) {
+    setLobbyLoading(true);
+    try {
+      const next = await api.tables(activeSession);
+      setLobbyTables(next);
+      if (announce) setStatus(`${next.length} table${next.length === 1 ? "" : "s"} available in the lobby`);
+    } catch (error) {
+      setStatus(errorMessage(error));
+    } finally {
+      setLobbyLoading(false);
+    }
+  }
+
+  function upsertLobbyTable(next: AleoTable) {
+    setLobbyTables((current) => [next, ...current.filter((candidate) => candidate.id !== next.id)]);
+  }
+
+  async function restoreSavedTable(activeSession: AleoSession): Promise<boolean> {
+    const savedTableId = rememberedTableId(activeSession.address);
+    if (!savedTableId) return false;
+    setStatus("Restoring your last table…");
+    try {
+      const savedTable = await api.table(activeSession, savedTableId);
+      setTable(savedTable);
+      setTableId(savedTable.id);
+      rememberTable(activeSession.address, savedTable.id);
+      if (savedTable.chain_status === "submitted") {
+        setStatus("Saved table creation was broadcast; waiting for Testnet finality…");
+        void trackTableCreation(activeSession, savedTable.id);
+      } else {
+        setStatus("Restored your saved Aleo table");
+      }
+      return true;
+    } catch {
+      window.localStorage.removeItem(savedTableKey(activeSession.address));
+      return false;
+    }
+  }
+
+  useEffect(() => {
+    if (restoredSession.current) return;
+    restoredSession.current = true;
+    const stored = loadStoredSession();
+    if (!stored) return;
+    void (async () => {
+      try {
+        await api.currentSession(stored.session);
+        setWalletId(stored.walletId);
+        setWalletAddress(stored.session.address);
+        setSession(stored.session);
+        const [provingResult, restoredTable] = await Promise.all([
+          api.provingStatus(stored.session).then((value) => ({ ok: true as const, value })).catch((error) => ({ ok: false as const, error })),
+          restoreSavedTable(stored.session),
+        ]);
+        if (provingResult.ok) {
+          setProving(provingResult.value);
+          setProvingError("");
+        } else {
+          setProving(undefined);
+          setProvingError(errorMessage(provingResult.error));
+        }
+        setPlayers((current) => current || mockPlayers(stored.session.address));
+        void refreshLobby(stored.session);
+        if (!restoredTable) setStatus(provingResult.ok ? "Wallet session restored" : "Wallet session restored, but the game backend mode could not be loaded");
+      } catch {
+        window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      }
+    })();
+  }, []);
 
   async function connect() {
     setBusy(true);
@@ -73,33 +170,23 @@ export function AleoPlay() {
       setStatus("Signing one-time login challenge…");
       const nextSession = await api.authenticate(wallet, address);
       await api.currentSession(nextSession);
-      setStatus("Initializing Aleo protocol player…");
-      const protocol = await initializeProtocolPlayer(wallet, address);
-      const provingStatus = await api.provingStatus(nextSession);
       setSession(nextSession);
-      setProtocolKey(protocol.publicKeyHex);
-      setProving(provingStatus);
+      storeSession(walletId, nextSession);
       setPlayers((current) => current || mockPlayers(address));
-      const savedTableId = rememberedTableId(address);
-      if (savedTableId) {
-        setStatus("Restoring your last table…");
-        try {
-          const savedTable = await api.table(nextSession, savedTableId);
-          setTable(savedTable);
-          setTableId(savedTable.id);
-          rememberTable(address, savedTable.id);
-          if (savedTable.chain_status === "submitted") {
-            setStatus("Saved table creation was broadcast; waiting for Testnet finality…");
-            void trackTableCreation(nextSession, savedTable.id);
-          } else {
-            setStatus("Restored your saved Aleo table");
-          }
-          return;
-        } catch {
-          window.localStorage.removeItem(savedTableKey(address));
-        }
+      void refreshLobby(nextSession);
+      const [provingResult, restoredTable] = await Promise.all([
+        api.provingStatus(nextSession).then((value) => ({ ok: true as const, value })).catch((error) => ({ ok: false as const, error })),
+        restoreSavedTable(nextSession),
+      ]);
+      if (provingResult.ok) {
+        setProving(provingResult.value);
+        setProvingError("");
+      } else {
+        setProving(undefined);
+        setProvingError(errorMessage(provingResult.error));
       }
-      setStatus("Wallet, session and protocol player ready");
+      if (restoredTable) return;
+      setStatus(provingResult.ok ? "Wallet, session and protocol player ready" : "Wallet authenticated, but the game backend mode could not be loaded");
     } catch (error) {
       setStatus(errorMessage(error));
     } finally {
@@ -118,8 +205,9 @@ export function AleoPlay() {
     setTable(undefined);
     setTableId("");
     setWalletAddress("");
-    setProtocolKey("");
     setProving(undefined);
+    setProvingError("");
+    window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
     setStatus("Wallet disconnected");
   }
 
@@ -138,6 +226,7 @@ export function AleoPlay() {
     try {
       const next = await api.createTable(session, addresses);
       setTable(next);
+      upsertLobbyTable(next);
       setTableId(next.id);
       rememberTable(session.address, next.id);
       if (next.creation_call) {
@@ -157,6 +246,7 @@ export function AleoPlay() {
     setStatus("Server executor is signing and broadcasting the table creation transaction…");
     const submitted = await api.submitTableCreationByExecutor(activeSession, activeTable.id);
     setTable(submitted.table);
+    upsertLobbyTable(submitted.table);
     setStatus(`Creation broadcast ${short(submitted.transaction_id ?? "")} · waiting for Testnet finality`);
     void trackTableCreation(activeSession, activeTable.id);
   }
@@ -180,7 +270,8 @@ export function AleoPlay() {
       for (let attempt = 0; attempt < 900; attempt += 1) {
         try {
           const creation = await api.tableCreation(activeSession, activeTableId);
-          setTable(creation.table);
+          setTable((current) => current?.id === activeTableId ? creation.table : current);
+          upsertLobbyTable(creation.table);
           if (creation.status === "confirmed") {
             setStatus(`Aleo table confirmed${creation.block_height ? ` at block ${creation.block_height}` : ""}`);
             return;
@@ -203,6 +294,7 @@ export function AleoPlay() {
     try {
       const next = await api.table(session, tableId);
       setTable(next);
+      upsertLobbyTable(next);
       if (next.chain_status === "submitted") {
         setStatus("Table creation was broadcast; waiting for Testnet finality…");
         void trackTableCreation(session, next.id);
@@ -216,21 +308,22 @@ export function AleoPlay() {
     }
   }
 
-  async function joinExistingTable() {
+  async function openTable(requested: string) {
     if (!session) {
       setStatus("Connect an Aleo wallet first");
       return;
     }
-    const requestedId = joinTableId.trim();
+    const requestedId = requested.trim();
     if (!requestedId) {
       setStatus("Enter a table ID to join");
       return;
     }
     setBusy(true);
-    setStatus("Loading the canonical Aleo table…");
+    setStatus("Opening table…");
     try {
       const next = await api.table(session, requestedId);
       setTable(next);
+      upsertLobbyTable(next);
       setTableId(next.id);
       rememberTable(session.address, next.id);
       const seated = next.seats.some((seat) => seat.address === session.address);
@@ -252,6 +345,10 @@ export function AleoPlay() {
     }
   }
 
+  async function joinExistingTable() {
+    await openTable(joinTableId);
+  }
+
   async function copyTableId() {
     if (!table) return;
     try {
@@ -262,73 +359,32 @@ export function AleoPlay() {
     }
   }
 
+  function changeTable() {
+    setTable(undefined);
+    setTableId("");
+    setStatus("Back in the lobby");
+    if (session) void refreshLobby(session);
+  }
+
   async function play(kind: ActionKind, amount?: number) {
     if (!session || !table) return;
     setBusy(true);
-    setStatus(`Previewing and signing ${kind}…`);
     try {
-      const result = await api.submitAction(session, selectedWallet(), table.id, kind, amount);
+      if (!proving) {
+        throw new Error(provingError || "The game backend mode is unavailable; refresh after the server is ready");
+      }
+      if (proving.gameplay_mode !== "server") {
+        throw new Error("The backend is configured for proof-per-action gameplay; enable server gameplay before playing");
+      }
+      setStatus(`Submitting ${kind} to the game server…`);
+      const result = await api.serverAction(session, table.id, kind, amount);
       setTable(result.table);
-      setStatus(`Action queued in Aleo job ${short(result.job_id)} · ${result.status}`);
-      void trackJob(session, table.id, result.job_id, result.table.chain_status === "mock");
+      upsertLobbyTable(result.table);
+      setStatus(`Server action applied · ${result.status}`);
     } catch (error) {
       setStatus(errorMessage(error));
     } finally {
       setBusy(false);
-    }
-  }
-
-  async function trackJob(activeSession: AleoSession, activeTableId: string, initialJobId: string, mockFinality: boolean) {
-    const labels: Record<string, string> = {
-      accepted: "Waiting for proof worker",
-      proving: "Generating Varuna proof",
-      proved: "Proof complete; preparing Aleo transaction",
-      prepared: "Transaction persisted; broadcasting",
-      submitted: "Transaction broadcast; waiting for finality",
-      finalized: mockFinality ? "Local simulation complete" : "Testnet confirmed",
-      retryablefailure: "Proof retry scheduled",
-      permanentfailure: "Action proof failed permanently",
-    };
-    const seen = new Set<string>();
-    let jobId = initialJobId;
-    while (!seen.has(jobId)) {
-      seen.add(jobId);
-      let finalized = false;
-      for (let attempt = 0; attempt < 900; attempt += 1) {
-        try {
-          const job: AleoJob = await api.job(activeSession, jobId);
-          setStatus(`${labels[job.status] ?? job.status}${job.transaction_id ? ` · ${short(job.transaction_id)}` : ""}`);
-          if (job.status === "finalized") {
-            finalized = true;
-            break;
-          }
-          if (job.status === "permanentfailure") {
-            setStatus(job.error ?? "Action proof failed permanently");
-            return;
-          }
-        } catch (error) {
-          setStatus(errorMessage(error));
-          return;
-        }
-        await new Promise((resolve) => window.setTimeout(resolve, 1000));
-      }
-      if (!finalized) {
-        setStatus(`Aleo job ${short(jobId)} is still processing; refresh later`);
-        return;
-      }
-      try {
-        const nextTable = await api.table(activeSession, activeTableId);
-        setTable(nextTable);
-        if (!nextTable.last_job || nextTable.last_job === jobId || seen.has(nextTable.last_job)) {
-          setStatus(mockFinality ? "Local simulation complete" : "Testnet confirmed");
-          return;
-        }
-        jobId = nextTable.last_job;
-        setStatus(`Following Aleo transition ${short(jobId)}…`);
-      } catch (error) {
-        setStatus(errorMessage(error));
-        return;
-      }
     }
   }
 
@@ -339,7 +395,7 @@ export function AleoPlay() {
         <div className="mb-10 max-w-3xl">
           <span className="eyebrow">Aleo testnet · native Varuna</span>
           <h1 className="heading-lg mt-5">Play private poker on Aleo</h1>
-          <p className="mt-4 text-lg leading-relaxed text-gray-400">Connect a wallet, create a three-player table, and sign each action. The table below is rendered from the authoritative `zgame_aleo` coordinator state.</p>
+          <p className="mt-4 text-lg leading-relaxed text-gray-400">Connect a wallet and create a three-player table. Buy-in/genesis and final settlement use Aleo; betting actions stay in the authoritative `zgame_aleo` server state for responsive play.</p>
         </div>
 
         <section className="grid gap-6 lg:grid-cols-[minmax(0,0.36fr)_minmax(0,0.64fr)]">
@@ -356,22 +412,25 @@ export function AleoPlay() {
               <button type="button" disabled={busy} onClick={() => void disconnect()} className="btn-ghost mt-3 w-full"><LogOut className="h-4 w-4" /> Disconnect</button>
             )}
             <div className="mt-4 flex items-start gap-2 rounded-xl border border-ink-700 bg-ink-900/70 p-3 text-xs text-gray-400"><span className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-mint-400" /><span>{status}</span></div>
-            {session && <dl className="mt-5 space-y-3 text-xs"><div><dt className="font-mono uppercase tracking-wider text-gray-600">Wallet</dt><dd className="mt-1 break-all text-gray-200">{walletAddress}</dd></div><div><dt className="font-mono uppercase tracking-wider text-gray-600">Protocol key</dt><dd className="mt-1 break-all font-mono text-gray-400">{short(protocolKey)}</dd></div><div><dt className="font-mono uppercase tracking-wider text-gray-600">Proving service</dt><dd className="mt-1 text-gray-200">{proving?.enabled ? `${proving.workers.length} worker${proving.workers.length === 1 ? "" : "s"} online` : "Local deployment worker not configured"}</dd></div></dl>}
+            {provingError && <div className="mt-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200">Game backend mode unavailable: {provingError}</div>}
+            {session && <dl className="mt-5 space-y-3 text-xs"><div><dt className="font-mono uppercase tracking-wider text-gray-600">Wallet</dt><dd className="mt-1 break-all text-gray-200">{walletAddress}</dd></div><div><dt className="font-mono uppercase tracking-wider text-gray-600">Gameplay</dt><dd className="mt-1 text-gray-200">Server-authoritative</dd></div><div><dt className="font-mono uppercase tracking-wider text-gray-600">Gameplay proofs</dt><dd className="mt-1 text-gray-200">{proving?.gameplay_mode === "server" ? "Not used — actions stay off-chain" : "Backend mode unavailable"}</dd></div></dl>}
           </div>
 
           <div className="card p-5 sm:p-6">
-            {!session ? <div className="flex min-h-[420px] flex-col items-center justify-center text-center"><LoaderCircle className="h-8 w-8 text-mint-400/60" /><h2 className="mt-4 text-lg font-semibold text-white">Connect a wallet to open a table</h2><p className="mt-2 max-w-md text-sm leading-relaxed text-gray-500">The table UI becomes live after the Aleo session is authenticated.</p></div> : !table ? <div className="space-y-8">
-              <div>
-                <div className="flex items-center gap-3"><WalletCards className="h-5 w-5 text-mint-400" /><h2 className="text-lg font-semibold text-white">Enter an existing table</h2></div>
-                <p className="mt-2 text-sm leading-relaxed text-gray-500">A table creator gives the other wallets its ID. Loading it confirms whether this wallet is one of the three Aleo seats.</p>
-                <label className="mt-5 block text-xs font-mono uppercase tracking-wider text-gray-500" htmlFor="join-table-id">Table ID</label>
-                <div className="mt-2 flex flex-col gap-2 sm:flex-row"><input id="join-table-id" value={joinTableId} onChange={(event) => setJoinTableId(event.target.value)} className="min-w-0 flex-1 rounded-xl border border-ink-600 bg-ink-900 px-3 py-3 font-mono text-xs text-gray-100 outline-none focus:border-mint-400" placeholder="51c3…" /><button type="button" disabled={busy || !joinTableId.trim()} onClick={() => void joinExistingTable()} className="btn-ghost sm:shrink-0"><WalletCards className="h-4 w-4" /> {busy ? "Loading…" : "Enter table"}</button></div>
+            {!session ? (
+              <div className="flex min-h-[420px] flex-col items-center justify-center text-center"><LoaderCircle className="h-8 w-8 text-mint-400/60" /><h2 className="mt-4 text-lg font-semibold text-white">Connect a wallet to enter the lobby</h2><p className="mt-2 max-w-md text-sm leading-relaxed text-gray-500">The lobby lists every table maintained by the Aleo game service.</p></div>
+            ) : !table ? (
+              <div className="space-y-8">
+                <div>
+                  <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><LayoutDashboard className="h-5 w-5 text-mint-400" /><div><h2 className="text-lg font-semibold text-white">Poker lobby</h2><p className="mt-1 text-sm text-gray-500">Created tables remain here after refresh and server restart.</p></div></div><button type="button" disabled={lobbyLoading || busy} onClick={() => void refreshLobby(session, true)} className="btn-ghost !px-3 !py-2 text-xs"><RefreshCw className={`h-3.5 w-3.5 ${lobbyLoading ? "animate-spin" : ""}`} /> Refresh</button></div>
+                  <div className="mt-5 grid gap-3 md:grid-cols-2">
+                    {lobbyLoading ? <div className="col-span-full flex min-h-32 items-center justify-center text-sm text-gray-500"><LoaderCircle className="mr-2 h-4 w-4 animate-spin text-mint-400" /> Loading tables…</div> : lobbyTables.length === 0 ? <div className="col-span-full rounded-2xl border border-dashed border-ink-600 bg-ink-900/50 p-6 text-center"><CircleDot className="mx-auto h-5 w-5 text-mint-400" /><p className="mt-3 text-sm font-semibold text-gray-200">No tables yet</p><p className="mt-1 text-xs text-gray-500">Create the first three-player table below.</p></div> : lobbyTables.map((lobbyTable) => { const seated = lobbyTable.seats.some((seat) => seat.address === session.address); return <button key={lobbyTable.id} type="button" disabled={busy} onClick={() => void openTable(lobbyTable.id)} className="group rounded-2xl border border-ink-700 bg-ink-900/70 p-4 text-left transition hover:border-mint-400/60 hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-50"><div className="flex items-start justify-between gap-3"><div><div className="font-mono text-[10px] uppercase tracking-[0.16em] text-gray-500">Table {short(lobbyTable.id)}</div><div className="mt-2 text-sm font-semibold text-white">Hand #{lobbyTable.hand_id} · pot {lobbyTable.pot}</div></div><span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${lobbyTable.chain_status === "confirmed" || lobbyTable.chain_status === "mock" ? "bg-mint-500/15 text-mint-300" : "bg-amber-300/10 text-amber-200"}`}>{lobbyTable.chain_status === "confirmed" || lobbyTable.chain_status === "mock" ? "Open" : lobbyTable.chain_status}</span></div><div className="mt-4 flex items-center justify-between gap-3 text-xs text-gray-400"><span className="flex items-center gap-1.5"><Users className="h-3.5 w-3.5 text-mint-400" /> {lobbyTable.seats.length}/3 seated</span><span>{seated ? "Your seat" : "Spectate"}</span></div><div className="mt-3 truncate font-mono text-[10px] text-gray-500">{lobbyTable.current_turn ? `${short(lobbyTable.current_turn)} to act` : "Waiting for next hand"}</div></button>; })}
+                  </div>
+                </div>
+                <details className="rounded-2xl border border-ink-700 bg-ink-900/50 p-4"><summary className="cursor-pointer text-sm font-semibold text-gray-200">Open a table by ID</summary><label className="mt-4 block text-xs font-mono uppercase tracking-wider text-gray-500" htmlFor="join-table-id">Table ID</label><div className="mt-2 flex flex-col gap-2 sm:flex-row"><input id="join-table-id" value={joinTableId} onChange={(event) => setJoinTableId(event.target.value)} className="min-w-0 flex-1 rounded-xl border border-ink-600 bg-ink-900 px-3 py-3 font-mono text-xs text-gray-100 outline-none focus:border-mint-400" placeholder="51c3…" /><button type="button" disabled={busy || !joinTableId.trim()} onClick={() => void joinExistingTable()} className="btn-ghost sm:shrink-0"><WalletCards className="h-4 w-4" /> Open</button></div></details>
+                <div className="border-t border-ink-700/70 pt-7"><div className="flex items-center gap-3"><Plus className="h-5 w-5 text-mint-400" /><h2 className="text-lg font-semibold text-white">Create a three-player table</h2></div><label className="mt-5 block text-xs font-mono uppercase tracking-wider text-gray-500" htmlFor="play-players">Player addresses</label><textarea id="play-players" rows={3} value={players} onChange={(event) => setPlayers(event.target.value)} className="mt-2 w-full resize-none rounded-xl border border-ink-600 bg-ink-900 px-3 py-3 font-mono text-xs text-gray-100 outline-none focus:border-mint-400" placeholder="aleo1…, aleo1…, aleo1…" /><button type="button" disabled={busy} onClick={() => void createTable()} className="btn-primary mt-3"><CheckCircle2 className="h-4 w-4" /> {busy ? "Preparing…" : "Create table"}</button><p className="mt-4 text-xs leading-relaxed text-gray-500">Exactly three unique addresses are required. The table is added to this lobby immediately; only buy-in/genesis and final settlement cross the chain boundary.</p></div>
               </div>
-              <div className="border-t border-ink-700/70 pt-7">
-                <div className="flex items-center gap-3"><CheckCircle2 className="h-5 w-5 text-mint-400" /><h2 className="text-lg font-semibold text-white">Create a three-player table</h2></div>
-                <label className="mt-5 block text-xs font-mono uppercase tracking-wider text-gray-500" htmlFor="play-players">Player addresses</label><textarea id="play-players" rows={3} value={players} onChange={(event) => setPlayers(event.target.value)} className="mt-2 w-full resize-none rounded-xl border border-ink-600 bg-ink-900 px-3 py-3 font-mono text-xs text-gray-100 outline-none focus:border-mint-400" placeholder="aleo1…, aleo1…, aleo1…" /><button type="button" disabled={busy} onClick={() => void createTable()} className="btn-primary mt-3"><CheckCircle2 className="h-4 w-4" /> {busy ? "Preparing…" : "Create table"}</button><p className="mt-4 text-xs leading-relaxed text-gray-500">Exactly three unique addresses are required. The server executor creates the Aleo table; each player wallet only signs its own game actions.</p>
-              </div>
-            </div> : <><div className="mb-5 flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="font-mono text-[10px] uppercase tracking-[0.18em] text-gray-500">Live coordinator payload</div><h2 className="mt-1 text-lg font-semibold text-white">Table {short(table.id)}</h2><div className="mt-2 flex max-w-full items-center gap-2"><code className="min-w-0 break-all font-mono text-[10px] text-gray-500">{table.id}</code><button type="button" onClick={() => void copyTableId()} className="shrink-0 rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-ink-700 hover:text-white" title="Copy full table ID" aria-label="Copy full table ID"><Copy className="h-3.5 w-3.5" /></button></div><div className="mt-2 text-xs text-gray-400">{(() => { const seat = table.seats.find((candidate) => candidate.address === session.address); return seat ? `Wallet seated at Seat ${seat.seat + 1} · stack ${seat.stack}` : "This wallet is not seated at this table"; })()}</div></div><button type="button" disabled={busy} onClick={() => void refreshTable()} className="btn-ghost !px-3 !py-2 text-xs"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button></div><PokerTablePreview table={table} currentAddress={session.address} busy={busy} status={status} onAction={(kind, amount) => void play(kind, amount)} onConfirmCreation={() => void confirmTableCreation()} /></>}
+            ) : <><div className="mb-5 flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="font-mono text-[10px] uppercase tracking-[0.18em] text-gray-500">Live table state</div><h2 className="mt-1 text-lg font-semibold text-white">Table {short(table.id)}</h2><div className="mt-2 flex max-w-full items-center gap-2"><code className="min-w-0 break-all font-mono text-[10px] text-gray-500">{table.id}</code><button type="button" onClick={() => void copyTableId()} className="shrink-0 rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-ink-700 hover:text-white" title="Copy full table ID" aria-label="Copy full table ID"><Copy className="h-3.5 w-3.5" /></button></div><div className="mt-2 text-xs text-gray-400">{(() => { const seat = table.seats.find((candidate) => candidate.address === session.address); return seat ? `Wallet seated at Seat ${seat.seat + 1} · stack ${seat.stack}` : "This wallet is not seated at this table"; })()}</div></div><div className="flex gap-2"><button type="button" disabled={busy} onClick={changeTable} className="btn-ghost !px-3 !py-2 text-xs"><LayoutDashboard className="h-3.5 w-3.5" /> Lobby</button><button type="button" disabled={busy} onClick={() => void refreshTable()} className="btn-ghost !px-3 !py-2 text-xs"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button></div></div><PokerTablePreview table={table} currentAddress={session.address} busy={busy} status={status} onAction={(kind, amount) => void play(kind, amount)} onConfirmCreation={() => void confirmTableCreation()} onRefresh={() => void refreshTable()} /></>}
           </div>
         </section>
       </div>

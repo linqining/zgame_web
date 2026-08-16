@@ -88,7 +88,22 @@ export function PokerTablePreview({
   const availableActions = table?.available_actions ?? fallbackActions;
   const seats = Array.from({ length: 5 }, (_, index) => table ? table.seats[index] : previewSeats[index]);
   const currentTurn = table ? table.current_turn : "mock:nova";
+  const currentTurnSeat = currentTurn
+    ? seats.find((seat) => seat?.address === currentTurn)
+    : undefined;
+  const currentTurnDescription = currentTurn
+    ? `${currentTurnSeat ? `Seat ${currentTurnSeat.seat + 1} · ` : ""}${displayName(currentTurn)}`
+    : "The next player";
   const canAct = Boolean(table && currentAddress && currentTurn === currentAddress && !busy && onAction);
+  const actionGateMessage = !table
+    ? "Load a table to play"
+    : table.chain_status !== "confirmed" && table.chain_status !== "mock"
+      ? "Actions unlock after the Aleo table-creation transaction is confirmed"
+      : !currentAddress
+        ? "Restore or connect the seated wallet to sign an action"
+        : currentTurn !== currentAddress
+          ? `${currentTurnDescription} is on turn — switch to that seated wallet to act`
+          : undefined;
   const canConfirmCreation = Boolean(
     table?.chain_status === "prepared"
       && onConfirmCreation
@@ -152,13 +167,21 @@ export function PokerTablePreview({
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2 text-xs text-gray-400">
           <CircleDot className="h-3.5 w-3.5 shrink-0 text-mint-400" />
-          <span className="truncate">{status ?? (currentTurn ? `${displayName(currentTurn)} to act` : "Waiting for the next proof transition")}</span>
+          <span className="truncate">{status ?? (currentTurn ? `${currentTurnDescription} to act` : "Waiting for the next proof transition")}</span>
         </div>
         <div className="flex items-center gap-2 text-xs text-gray-500">
           <LockKeyhole className="h-3.5 w-3.5 text-mint-400" />
           <span>Hole cards encrypted</span>
         </div>
       </div>
+
+      {table && currentTurn && (
+        <div className="mt-3 rounded-xl border border-ink-700 bg-ink-900/70 px-3 py-2 text-xs text-gray-400">
+          <span className="font-mono uppercase tracking-wider text-gray-600">Turn owner</span>
+          <span className="ml-2 font-semibold text-mint-300">{currentTurnSeat ? `Seat ${currentTurnSeat.seat + 1}` : "Seated player"}</span>
+          <span className="mt-1 block break-all font-mono text-gray-200">{currentTurn}</span>
+        </div>
+      )}
 
       {canConfirmCreation ? (
         <div className="mt-4 rounded-xl border border-amber-300/25 bg-amber-300/[0.06] p-3">
@@ -173,8 +196,10 @@ export function PokerTablePreview({
           {onRefresh && <button type="button" disabled={busy} onClick={onRefresh} className="btn-ghost !px-3 !py-2 text-xs" title="Refresh table state"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button>}
         </div>
       ) : onAction ? (
-        <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {availableActions.map((action) => (
+        <div className="mt-4">
+          {actionGateMessage && <p className="mb-2 text-xs text-amber-200">{actionGateMessage}</p>}
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {availableActions.map((action) => (
             <button
               key={action}
               type="button"
@@ -185,12 +210,13 @@ export function PokerTablePreview({
               {action === "fold" ? <Flag className="h-3.5 w-3.5" /> : action === "check" || action === "call" ? <Check className="h-3.5 w-3.5" /> : <Zap className="h-3.5 w-3.5" />}
               {actionLabels[action]}
             </button>
-          ))}
-          <label className="col-span-2 flex items-center gap-2 rounded-xl border border-ink-600 bg-ink-800/60 px-3 py-2 text-xs text-gray-400 sm:col-span-1">
-            <span className="font-mono uppercase tracking-wider">Amount</span>
-            <input className="w-full min-w-0 bg-transparent text-right font-mono text-gray-100 outline-none" type="number" min={1} value={amount} onChange={(event) => setAmount(Math.max(1, Number(event.target.value) || 1))} />
-          </label>
-          {onRefresh && <button type="button" disabled={busy} onClick={onRefresh} className="btn-ghost !px-3 !py-2 text-xs" title="Refresh table state"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button>}
+            ))}
+            <label className="col-span-2 flex items-center gap-2 rounded-xl border border-ink-600 bg-ink-800/60 px-3 py-2 text-xs text-gray-400 sm:col-span-1">
+              <span className="font-mono uppercase tracking-wider">Amount</span>
+              <input className="w-full min-w-0 bg-transparent text-right font-mono text-gray-100 outline-none" type="number" min={1} value={amount} onChange={(event) => setAmount(Math.max(1, Number(event.target.value) || 1))} />
+            </label>
+            {onRefresh && <button type="button" disabled={busy} onClick={onRefresh} className="btn-ghost !px-3 !py-2 text-xs" title="Refresh table state"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button>}
+          </div>
         </div>
       ) : (
         <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">

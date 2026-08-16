@@ -8,6 +8,7 @@ export type AleoSession = {
 
 export type AleoProvingStatus = {
   enabled: boolean;
+  gameplay_mode: 'server' | 'proof';
   workers: Array<{
     relation: string;
     state: string;
@@ -30,7 +31,7 @@ export type AleoProvingStatus = {
 
 export type AleoTable = {
   id: string;
-  phase: 'betting' | 'reveal' | 'showdown_ready' | 'terminal';
+  phase: 'betting' | 'reveal' | 'ready' | 'showdown_ready' | 'terminal';
   hand_id: number;
   call_seq: number;
   street: number;
@@ -54,6 +55,15 @@ export type AleoTable = {
     program: string;
     function: string;
     inputs: string[];
+  };
+  settlement?: {
+    hand_id: number;
+    winner_mask: number;
+    gross_pot: number;
+    payouts: number[];
+    status: 'pending' | 'submitted' | 'confirmed' | 'failed';
+    transaction_id?: string;
+    error?: string;
   };
 };
 
@@ -129,6 +139,12 @@ export class ZgameAleoApi {
     });
   }
 
+  tables(session: AleoSession): Promise<AleoTable[]> {
+    return this.request('/api/aleo/tables', {
+      headers: { Authorization: `Bearer ${session.token}` },
+    });
+  }
+
   createTable(session: AleoSession, players: string[]): Promise<AleoTable> {
     return this.request('/api/aleo/tables', {
       method: 'POST',
@@ -181,6 +197,29 @@ export class ZgameAleoApi {
       method: 'POST',
       headers: { Authorization: `Bearer ${session.token}` },
       body: JSON.stringify({ preview_id: preview.preview_id, signature }),
+    });
+  }
+
+  serverAction(
+    session: AleoSession,
+    tableId: string,
+    kind: 'check' | 'call' | 'fold' | 'bet' | 'raise',
+    amount?: number,
+  ): Promise<{ job_id: string; status: string; table: AleoTable }> {
+    return this.request(`/api/aleo/tables/${encodeURIComponent(tableId)}/actions/server`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${session.token}` },
+      body: JSON.stringify({ kind, amount }),
+    });
+  }
+
+  timeoutAction(
+    session: AleoSession,
+    tableId: string,
+  ): Promise<{ job_id: string; status: string; table: AleoTable }> {
+    return this.request(`/api/aleo/tables/${encodeURIComponent(tableId)}/actions/timeout`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${session.token}` },
     });
   }
 
