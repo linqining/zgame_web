@@ -103,6 +103,8 @@ export function PokerTablePreview({
     : undefined;
   const secondsRemaining = timeoutAt === undefined ? undefined : Math.max(0, timeoutAt - now);
   const timeoutExpired = Boolean(timeoutAt !== undefined && now >= timeoutAt);
+  const nextHandAt = table?.next_hand_at;
+  const intermissionSeconds = nextHandAt === undefined ? undefined : Math.max(0, nextHandAt - now);
   const canAct = Boolean(table && isOwnTurn && !ownSeat?.leaving && !ownSeat?.left && !busy && onAction && (table.chain_status === "confirmed" || table.chain_status === "mock"));
   const availableActions = table?.available_actions ?? [];
   // The server receives bet/raise as the player's total contribution on this
@@ -119,11 +121,11 @@ export function PokerTablePreview({
   const tableReady = table?.chain_status === "confirmed" || table?.chain_status === "mock";
 
   useEffect(() => {
-    if (timeoutAt === undefined) return;
+    if (timeoutAt === undefined && nextHandAt === undefined) return;
     setNow(Math.floor(Date.now() / 1000) + serverTimeOffsetSeconds);
     const timer = window.setInterval(() => setNow(Math.floor(Date.now() / 1000) + serverTimeOffsetSeconds), 1000);
     return () => window.clearInterval(timer);
-  }, [timeoutAt, serverTimeOffsetSeconds]);
+  }, [timeoutAt, nextHandAt, serverTimeOffsetSeconds]);
 
   const message = tableReady
     ? status || (currentTurn ? `${currentTurnSeat ? `Seat ${currentTurnSeat.seat + 1}` : "A seated player"} is on turn` : "Waiting for the next hand")
@@ -167,7 +169,7 @@ export function PokerTablePreview({
               }`}
             >
               {seat ? <>
-                <span className="flex h-[38%] w-[38%] items-center justify-center rounded-full bg-gradient-to-br from-slate-500 to-slate-900 font-mono text-[clamp(10px,1.25vw,16px)] font-bold text-white">{displayName(seat.address).slice(0, 2).toUpperCase()}</span>
+                <span className={`flex h-[38%] w-[38%] items-center justify-center rounded-full bg-gradient-to-br from-slate-500 to-slate-900 font-mono text-[clamp(10px,1.25vw,16px)] font-bold text-white ${seat.address === currentTurn && !timeoutExpired ? "turn-avatar" : ""}`}>{displayName(seat.address).slice(0, 2).toUpperCase()}</span>
                 <span className="mt-1 max-w-[84%] truncate text-[clamp(8px,1.1vw,13px)] font-semibold text-white">{displayName(seat.address)}</span>
                 <span className="font-mono text-[clamp(8px,1vw,12px)] text-emerald-300">{amountLabel(seat.stack)}</span>
                 {seat.address === currentAddress && <span className="mt-0.5 text-[7px] font-bold uppercase tracking-[0.16em] text-sky-200">You · Seat {seat.seat + 1}</span>}
@@ -186,7 +188,7 @@ export function PokerTablePreview({
           </div>
           <div className="absolute bottom-[5%] left-1/2 z-10 flex max-w-[82%] -translate-x-1/2 items-center gap-2 rounded-full border border-white/10 bg-black/45 px-3 py-2 text-center text-[11px] text-gray-200 backdrop-blur sm:text-xs">
             <CircleDot className="h-3.5 w-3.5 shrink-0 text-emerald-300" />
-            <span className="truncate">{message}</span>
+            <span className="truncate">{intermissionSeconds !== undefined ? `Hand complete · next hand in ${countdown(intermissionSeconds)}` : message}</span>
           </div>
           {ownSeat && !ownSeat.left && (
             <div className="absolute bottom-[16%] left-1/2 z-10 flex -translate-x-1/2 gap-1.5">
@@ -202,6 +204,12 @@ export function PokerTablePreview({
         <div className="absolute bottom-[calc(8.8rem+env(safe-area-inset-bottom))] left-1/2 z-20 -translate-x-1/2 rounded-xl border border-white/10 bg-black/35 px-3 py-2 text-center text-[11px] backdrop-blur sm:bottom-32">
           <span className="text-gray-400">Turn: </span><span className="font-semibold text-emerald-200">Seat {currentTurnSeat ? currentTurnSeat.seat + 1 : "?"}</span>
           {secondsRemaining !== undefined && <span className={`ml-2 font-mono ${secondsRemaining === 0 ? "text-rose-200" : secondsRemaining <= 15 ? "text-amber-200" : "text-gray-200"}`}>{secondsRemaining === 0 ? "EXPIRED" : countdown(secondsRemaining)}</span>}
+        </div>
+      )}
+
+      {intermissionSeconds !== undefined && (
+        <div className="absolute bottom-[calc(8.8rem+env(safe-area-inset-bottom))] left-1/2 z-20 mt-1 -translate-x-1/2 translate-y-full rounded-xl border border-amber-200/20 bg-black/35 px-3 py-1.5 text-center text-[11px] text-amber-100 backdrop-blur sm:bottom-32">
+          Leave or wait for the next hand · {countdown(intermissionSeconds)}
         </div>
       )}
 

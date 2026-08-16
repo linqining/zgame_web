@@ -110,3 +110,12 @@ html {
     transition-duration: 0.01ms !important;
   }
 }
+
+@keyframes turn-avatar-pulse {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.45); }
+  50% { transform: scale(1.08); box-shadow: 0 0 0 8px rgba(52, 211, 153, 0); }
+}
+
+.turn-avatar {
+  animation: turn-avatar-pulse 1.5s ease-in-out infinite;
+}

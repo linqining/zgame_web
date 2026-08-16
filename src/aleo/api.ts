@@ -32,6 +32,7 @@ export type AleoProvingStatus = {
 
 export type AleoTable = {
   id: string;
+  lobby_slot?: number;
   phase: 'betting' | 'reveal' | 'ready' | 'showdown_ready' | 'terminal';
   hand_id: number;
   call_seq: number;
@@ -72,6 +73,7 @@ export type AleoTable = {
   };
   leaves: AleoLeave[];
   turn_started_at: number;
+  next_hand_at?: number;
 };
 
 export type AleoLeave = {
@@ -177,11 +179,11 @@ export class ZgameAleoApi {
     });
   }
 
-  createTable(session: AleoSession, players: string[]): Promise<AleoTable> {
+  createTable(session: AleoSession, players: string[], lobbySlot?: number): Promise<AleoTable> {
     return this.request('/api/aleo/tables', {
       method: 'POST',
       headers: { Authorization: `Bearer ${session.token}` },
-      body: JSON.stringify({ players }),
+      body: JSON.stringify({ players, lobby_slot: lobbySlot }),
     });
   }
 
