@@ -33,7 +33,7 @@ export type AleoProvingStatus = {
 export type AleoTable = {
   id: string;
   lobby_slot?: number;
-  phase: 'betting' | 'reveal' | 'ready' | 'showdown_ready' | 'terminal';
+  phase: 'waiting' | 'betting' | 'reveal' | 'ready' | 'showdown_ready' | 'terminal';
   hand_id: number;
   call_seq: number;
   street: number;
@@ -84,6 +84,20 @@ export type AleoLeave = {
   status: 'requested' | 'ready' | 'pending' | 'submitted' | 'confirmed' | 'failed';
   transaction_id?: string;
   error?: string;
+};
+
+export type AleoBuyInIntent = {
+  intent_id: string;
+  recipient: string;
+  amount: number;
+  microcredits: number;
+  expires_at: number;
+};
+
+export type AleoBuyIn = {
+  status: 'pending' | 'funded';
+  transaction_id: string;
+  table: AleoTable;
 };
 
 export type AleoTableEvent = {
@@ -184,6 +198,28 @@ export class ZgameAleoApi {
       method: 'POST',
       headers: { Authorization: `Bearer ${session.token}` },
       body: JSON.stringify({ players, lobby_slot: lobbySlot }),
+    });
+  }
+
+  createBuyInIntent(session: AleoSession, tableId: string, amount?: number): Promise<AleoBuyInIntent> {
+    return this.request(`/api/aleo/tables/${encodeURIComponent(tableId)}/buy-in/intents`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${session.token}` },
+      body: JSON.stringify({ amount }),
+    });
+  }
+
+  confirmBuyIn(
+    session: AleoSession,
+    tableId: string,
+    intentId: string,
+    transactionId: string,
+    amount?: number,
+  ): Promise<AleoBuyIn> {
+    return this.request(`/api/aleo/tables/${encodeURIComponent(tableId)}/buy-in`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${session.token}` },
+      body: JSON.stringify({ amount, intent_id: intentId, transaction_id: transactionId }),
     });
   }
 

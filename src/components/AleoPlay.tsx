@@ -8,7 +8,7 @@ import {
   type AleoTable,
   type AleoTableEvent,
 } from "../aleo/api";
-import { connectedAddress, walletOptions } from "../aleo/wallet";
+import { connectedAddress, transactionIdFromWalletResult, walletOptions } from "../aleo/wallet";
 import { PokerTablePreview } from "./PokerTablePreview";
 
 const api = new ZgameAleoApi(import.meta.env.VITE_ZGAME_ALEO_API ?? "http://127.0.0.1:9011");
@@ -19,6 +19,13 @@ const LOBBY_TABLE_SLOTS = Array.from({ length: 6 }, (_, index) => `table-${Strin
 type StoredSession = {
   walletId: string;
   session: AleoSession;
+};
+
+type PendingBuyIn = {
+  tableId: string;
+  intentId: string;
+  transactionId: string;
+  amount: number;
 };
 
 function mockPlayers(address: string) {
@@ -54,6 +61,27 @@ function rememberTable(address: string, tableId: string) {
   window.localStorage.setItem(savedTableKey(address), tableId);
 }
 
+function pendingBuyInKey(address: string) {
+  return `zgame-aleo:pending-buy-in:${address}`;
+}
+
+function loadPendingBuyIn(address: string): PendingBuyIn | undefined {
+  try {
+    const value = JSON.parse(window.sessionStorage.getItem(pendingBuyInKey(address)) ?? "") as PendingBuyIn;
+    return value.tableId && value.intentId && value.transactionId && value.amount > 0 ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function storePendingBuyIn(address: string, value: PendingBuyIn) {
+  window.sessionStorage.setItem(pendingBuyInKey(address), JSON.stringify(value));
+}
+
+function clearPendingBuyIn(address: string) {
+  window.sessionStorage.removeItem(pendingBuyInKey(address));
+}
+
 function loadStoredSession(): StoredSession | undefined {
   try {
     const stored = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
@@ -83,6 +111,7 @@ export function AleoPlay() {
   const [provingError, setProvingError] = useState("");
   const [players, setPlayers] = useState("");
   const [table, setTable] = useState<AleoTable>();
+  const [pendingBuyIn, setPendingBuyIn] = useState<PendingBuyIn>();
   const [lobbyTables, setLobbyTables] = useState<AleoTable[]>([]);
   const [lobbyLoading, setLobbyLoading] = useState(false);
   const [tableId, setTableId] = useState("");
@@ -318,6 +347,7 @@ export function AleoPlay() {
       await api.currentSession(nextSession);
       setSession(nextSession);
       storeSession(walletId, nextSession);
+      setPendingBuyIn(loadPendingBuyIn(nextSession.address));
       setPlayers((current) => current || mockPlayers(address));
       void refreshLobby(nextSession);
       const [provingResult, restoredTable] = await Promise.all([
@@ -535,6 +565,60 @@ export function AleoPlay() {
     }
   }
 
+  async function buyIn(amount: number) {
+    if (!session || !table) return;
+    const activeSession = session;
+    const activeTableId = table.id;
+    setBusy(true);
+    setStatus(pendingBuyIn?.tableId === activeTableId ? "Resuming Aleo buy-in confirmation…" : "Reserving an open seat…");
+    try {
+      let payment = pendingBuyIn?.tableId === activeTableId
+        ? pendingBuyIn
+        : undefined;
+      if (!payment) {
+        const intent = await api.createBuyInIntent(activeSession, activeTableId, amount);
+        setStatus(`Approve ${intent.microcredits.toLocaleString()} public microcredits in your Aleo wallet…`);
+        const wallet = selectedWallet();
+        const transactionId = transactionIdFromWalletResult(await wallet.execute({
+          program: "credits.aleo",
+          function: "transfer_public",
+          inputs: [intent.recipient, `${intent.microcredits}u64`],
+        }));
+        payment = {
+          tableId: activeTableId,
+          intentId: intent.intent_id,
+          transactionId,
+          amount,
+        };
+        setPendingBuyIn(payment);
+        storePendingBuyIn(activeSession.address, payment);
+      }
+      setStatus("Buy-in broadcast. Waiting for Aleo finality; do not submit another payment…");
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        const result = await api.confirmBuyIn(
+          activeSession,
+          activeTableId,
+          payment.intentId,
+          payment.transactionId,
+          payment.amount,
+        );
+        if (result.status === "funded") {
+          applyTableSnapshot(result.table);
+          setPendingBuyIn(undefined);
+          clearPendingBuyIn(activeSession.address);
+          setStatus(result.table.current_turn ? "Buy-in confirmed · hand is live" : "Buy-in confirmed · waiting for another player");
+          return;
+        }
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 3_000));
+      }
+      setStatus("The wallet payment is still awaiting Aleo finality. Keep this table open and refresh later; do not send another transfer.");
+    } catch (error) {
+      setStatus(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function leaveTable() {
     if (!session || !table) return;
     setBusy(true);
@@ -573,6 +657,7 @@ export function AleoPlay() {
         turnTimeoutSeconds={proving?.server_turn_timeout_seconds ?? 20}
         serverTimeOffsetSeconds={serverTimeOffsetSeconds}
         onAction={(kind, amount) => void play(kind, amount)}
+        onBuyIn={(amount) => void buyIn(amount)}
         onConfirmCreation={() => void confirmTableCreation()}
         onRefresh={() => void refreshTable()}
         onLobby={changeTable}
@@ -588,7 +673,7 @@ export function AleoPlay() {
         <div className="mb-10 max-w-3xl">
           <span className="eyebrow">Aleo testnet · native Varuna</span>
           <h1 className="heading-lg mt-5">Play private poker on Aleo</h1>
-          <p className="mt-4 text-lg leading-relaxed text-gray-400">Connect a wallet and create a three-player table. The default buy-in is 1 ALEO (1,000 chips); buy-in/genesis and final settlement use Aleo, while betting actions stay in the authoritative `zgame_aleo` server state.</p>
+          <p className="mt-4 text-lg leading-relaxed text-gray-400">Connect a wallet and choose one of the six server-maintained tables. Buy in with 1 ALEO (1,000 chips); betting actions stay in the authoritative `zgame_aleo` server state.</p>
         </div>
 
         <section className="grid gap-6 lg:grid-cols-[minmax(0,0.36fr)_minmax(0,0.64fr)]">
@@ -617,13 +702,12 @@ export function AleoPlay() {
                 <div>
                   <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><LayoutDashboard className="h-5 w-5 text-mint-400" /><div><h2 className="text-lg font-semibold text-white">Poker lobby</h2><p className="mt-1 text-sm text-gray-500">Six fixed slots show the current live table assignments.</p></div></div><button type="button" disabled={lobbyLoading || busy} onClick={() => void refreshLobby(session, true)} className="btn-ghost !px-3 !py-2 text-xs"><RefreshCw className={`h-3.5 w-3.5 ${lobbyLoading ? "animate-spin" : ""}`} /> Refresh</button></div>
                   <div className="mt-5 grid gap-3 md:grid-cols-2">
-                    {lobbyLoading ? <div className="col-span-full flex min-h-32 items-center justify-center text-sm text-gray-500"><LoaderCircle className="mr-2 h-4 w-4 animate-spin text-mint-400" /> Loading tables…</div> : LOBBY_TABLE_SLOTS.map((slot, index) => { const lobbyTable = lobbyTables.find((candidate) => candidate.lobby_slot === index + 1); const activeSeats = lobbyTable?.seats.filter((seat) => Boolean(seat.address)); const seated = activeSeats?.some((seat) => seat.address === session.address); return <button key={slot} type="button" disabled={busy || !lobbyTable} onClick={() => lobbyTable && void openTable(lobbyTable.id)} className="group rounded-2xl border border-ink-700 bg-ink-900/70 p-4 text-left transition hover:border-mint-400/60 hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-60"><div className="flex items-start justify-between gap-3"><div><div className="font-mono text-[10px] uppercase tracking-[0.16em] text-gray-500">Table {slot.replace("table-", "")}</div><div className="mt-2 text-sm font-semibold text-white">{lobbyTable ? `Hand #${lobbyTable.hand_id} · pot ${lobbyTable.pot}` : "Waiting for a table"}</div></div><span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${lobbyTable ? (lobbyTable.chain_status === "confirmed" || lobbyTable.chain_status === "mock" ? "bg-mint-500/15 text-mint-300" : "bg-amber-300/10 text-amber-200") : "bg-ink-700 text-gray-500"}`}>{lobbyTable ? (lobbyTable.chain_status === "confirmed" || lobbyTable.chain_status === "mock" ? "Open" : lobbyTable.chain_status) : "Empty"}</span></div><div className="mt-4 flex items-center justify-between gap-3 text-xs text-gray-400"><span className="flex items-center gap-1.5"><Users className="h-3.5 w-3.5 text-mint-400" /> {lobbyTable ? `${activeSeats?.length ?? 0}/3 seated` : "0/3 seated"}</span><span>{lobbyTable ? (seated ? "Your seat" : "Spectate") : "Create or open by ID"}</span></div><div className="mt-3 truncate font-mono text-[10px] text-gray-500">{lobbyTable?.current_turn ? `${short(lobbyTable.current_turn)} to act` : lobbyTable ? "Waiting for next hand" : "No active table"}</div></button>; })}
+                    {lobbyLoading ? <div className="col-span-full flex min-h-32 items-center justify-center text-sm text-gray-500"><LoaderCircle className="mr-2 h-4 w-4 animate-spin text-mint-400" /> Loading tables…</div> : LOBBY_TABLE_SLOTS.map((slot, index) => { const lobbyTable = lobbyTables.find((candidate) => candidate.lobby_slot === index + 1); const activeSeats = lobbyTable?.seats.filter((seat) => Boolean(seat.address)); const seated = activeSeats?.some((seat) => seat.address === session.address); return <button key={slot} type="button" disabled={busy || !lobbyTable} onClick={() => lobbyTable && void openTable(lobbyTable.id)} className="group rounded-2xl border border-ink-700 bg-ink-900/70 p-4 text-left transition hover:border-mint-400/60 hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-60"><div className="flex items-start justify-between gap-3"><div><div className="font-mono text-[10px] uppercase tracking-[0.16em] text-gray-500">Table {slot.replace("table-", "")}</div><div className="mt-2 text-sm font-semibold text-white">{lobbyTable ? `Hand #${lobbyTable.hand_id} · pot ${lobbyTable.pot}` : "Waiting for a table"}</div></div><span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${lobbyTable ? (lobbyTable.chain_status === "confirmed" || lobbyTable.chain_status === "mock" ? "bg-mint-500/15 text-mint-300" : "bg-amber-300/10 text-amber-200") : "bg-ink-700 text-gray-500"}`}>{lobbyTable ? (lobbyTable.chain_status === "confirmed" || lobbyTable.chain_status === "mock" ? "Open" : lobbyTable.chain_status) : "Empty"}</span></div><div className="mt-4 flex items-center justify-between gap-3 text-xs text-gray-400"><span className="flex items-center gap-1.5"><Users className="h-3.5 w-3.5 text-mint-400" /> {lobbyTable ? `${activeSeats?.length ?? 0}/3 seated` : "0/3 seated"}</span><span>{lobbyTable ? (seated ? "Your seat" : "Spectate") : "Waiting for server"}</span></div><div className="mt-3 truncate font-mono text-[10px] text-gray-500">{lobbyTable?.current_turn ? `${short(lobbyTable.current_turn)} to act` : lobbyTable ? "Waiting for buy-in" : "No active table"}</div></button>; })}
                   </div>
                 </div>
-                <details className="rounded-2xl border border-ink-700 bg-ink-900/50 p-4"><summary className="cursor-pointer text-sm font-semibold text-gray-200">Open a table by ID</summary><label className="mt-4 block text-xs font-mono uppercase tracking-wider text-gray-500" htmlFor="join-table-id">Table ID</label><div className="mt-2 flex flex-col gap-2 sm:flex-row"><input id="join-table-id" value={joinTableId} onChange={(event) => setJoinTableId(event.target.value)} className="min-w-0 flex-1 rounded-xl border border-ink-600 bg-ink-900 px-3 py-3 font-mono text-xs text-gray-100 outline-none focus:border-mint-400" placeholder="51c3…" /><button type="button" disabled={busy || !joinTableId.trim()} onClick={() => void joinExistingTable()} className="btn-ghost sm:shrink-0"><WalletCards className="h-4 w-4" /> Open</button></div></details>
-                <div className="border-t border-ink-700/70 pt-7"><div className="flex items-center gap-3"><Plus className="h-5 w-5 text-mint-400" /><h2 className="text-lg font-semibold text-white">Create a three-player table</h2></div><label className="mt-5 block text-xs font-mono uppercase tracking-wider text-gray-500" htmlFor="play-lobby-slot">Fixed lobby table</label><select id="play-lobby-slot" value={lobbySlot} onChange={(event) => setLobbySlot(Number(event.target.value))} className="mt-2 w-full rounded-xl border border-ink-600 bg-ink-900 px-3 py-3 text-sm text-gray-100 outline-none focus:border-mint-400">{LOBBY_TABLE_SLOTS.map((slot, index) => <option key={slot} value={index + 1}>Table {slot.replace("table-", "")}</option>)}</select><label className="mt-5 block text-xs font-mono uppercase tracking-wider text-gray-500" htmlFor="play-players">Player addresses</label><textarea id="play-players" rows={3} value={players} onChange={(event) => setPlayers(event.target.value)} className="mt-2 w-full resize-none rounded-xl border border-ink-600 bg-ink-900 px-3 py-3 font-mono text-xs text-gray-100 outline-none focus:border-mint-400" placeholder="aleo1…, aleo1…, aleo1…" /><button type="button" disabled={busy} onClick={() => void createTable()} className="btn-primary mt-3"><CheckCircle2 className="h-4 w-4" /> {busy ? "Preparing…" : "Create table"}</button><p className="mt-4 text-xs leading-relaxed text-gray-500">Exactly three unique addresses are required. The table is added to this lobby immediately; only buy-in/genesis and final settlement cross the chain boundary.</p></div>
+                <div className="rounded-2xl border border-ink-700 bg-ink-900/40 p-4 text-sm text-gray-400">Six fixed tables are maintained by the server. Open a table from the lobby, then buy in from an available seat.</div>
               </div>
-            ) : <><div className="mb-5 flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="font-mono text-[10px] uppercase tracking-[0.18em] text-gray-500">Live table state · {realtimeState === "live" ? "WebSocket live" : "reconnecting"}</div><h2 className="mt-1 text-lg font-semibold text-white">Table {short(table.id)}</h2><div className="mt-2 flex max-w-full items-center gap-2"><code className="min-w-0 break-all font-mono text-[10px] text-gray-500">{table.id}</code><button type="button" onClick={() => void copyTableId()} className="shrink-0 rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-ink-700 hover:text-white" title="Copy full table ID" aria-label="Copy full table ID"><Copy className="h-3.5 w-3.5" /></button></div><div className="mt-2 text-xs text-gray-400">{(() => { const seat = table.seats.find((candidate) => candidate.address === session.address); return seat ? <span className="font-semibold text-mint-300">This browser is Seat {seat.seat + 1} · {short(session.address)} · stack {seat.stack}</span> : "This wallet is not seated at this table"; })()}</div></div><div className="flex gap-2"><button type="button" onClick={changeTable} className="btn-ghost !px-3 !py-2 text-xs"><LayoutDashboard className="h-3.5 w-3.5" /> Lobby</button><button type="button" disabled={busy} onClick={() => void refreshTable()} className="btn-ghost !px-3 !py-2 text-xs"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button></div></div><PokerTablePreview table={table} currentAddress={session.address} busy={busy} status={status} turnTimeoutSeconds={proving?.server_turn_timeout_seconds ?? 20} onAction={(kind, amount) => void play(kind, amount)} onConfirmCreation={() => void confirmTableCreation()} onRefresh={() => void refreshTable()} /></>}
+          ) : <><div className="mb-5 flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="font-mono text-[10px] uppercase tracking-[0.18em] text-gray-500">Live table state · {realtimeState === "live" ? "WebSocket live" : "reconnecting"}</div><h2 className="mt-1 text-lg font-semibold text-white">Table {short(table.id)}</h2><div className="mt-2 flex max-w-full items-center gap-2"><code className="min-w-0 break-all font-mono text-[10px] text-gray-500">{table.id}</code><button type="button" onClick={() => void copyTableId()} className="shrink-0 rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-ink-700 hover:text-white" title="Copy full table ID" aria-label="Copy full table ID"><Copy className="h-3.5 w-3.5" /></button></div><div className="mt-2 text-xs text-gray-400">{(() => { const seat = table.seats.find((candidate) => candidate.address === session.address); return seat ? <span className="font-semibold text-mint-300">This browser is Seat {seat.seat + 1} · {short(session.address)} · stack {seat.stack}</span> : "This wallet is not seated at this table"; })()}</div></div><div className="flex gap-2"><button type="button" onClick={changeTable} className="btn-ghost !px-3 !py-2 text-xs"><LayoutDashboard className="h-3.5 w-3.5" /> Lobby</button><button type="button" disabled={busy} onClick={() => void refreshTable()} className="btn-ghost !px-3 !py-2 text-xs"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button></div></div><PokerTablePreview table={table} currentAddress={session.address} busy={busy} status={status} turnTimeoutSeconds={proving?.server_turn_timeout_seconds ?? 20} onAction={(kind, amount) => void play(kind, amount)} onBuyIn={(amount) => void buyIn(amount)} onConfirmCreation={() => void confirmTableCreation()} onRefresh={() => void refreshTable()} /></>}
           </div>
         </section>
       </div>

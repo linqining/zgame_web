@@ -15,6 +15,7 @@ type PokerTablePreviewProps = {
   turnTimeoutSeconds?: number;
   serverTimeOffsetSeconds?: number;
   onAction?: (kind: ActionKind, amount?: number) => void;
+  onBuyIn?: (amount: number) => void;
   onConfirmCreation?: () => void;
   onRefresh?: () => void;
   onLobby?: () => void;
@@ -85,12 +86,14 @@ export function PokerTablePreview({
   turnTimeoutSeconds = 20,
   serverTimeOffsetSeconds = 0,
   onAction,
+  onBuyIn,
   onConfirmCreation,
   onRefresh,
   onLobby,
   onLeave,
 }: PokerTablePreviewProps) {
   const [amount, setAmount] = useState(10);
+  const [buyInAmount] = useState(1000);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000) + serverTimeOffsetSeconds);
   const seats = Array.from({ length: 5 }, (_, index) => {
     const seat = table?.seats[index];
@@ -138,12 +141,12 @@ export function PokerTablePreview({
     <main className="relative min-h-[100svh] overflow-hidden bg-[#0c120f] text-white">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_40%,rgba(31,76,53,0.36),transparent_42%),linear-gradient(180deg,#101a14_0%,#08100d_72%)]" />
 
-      <header className="absolute inset-x-0 top-0 z-30 flex items-center justify-between p-4 sm:p-6">
+      <header className="pointer-events-auto absolute inset-x-0 top-0 z-[100] flex items-center justify-between p-4 sm:p-6">
         <div className="flex items-center gap-2">
-          <button type="button" onClick={onLobby} className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-xs font-semibold text-gray-200 backdrop-blur transition hover:bg-white/10">
+          <button type="button" onClick={() => onLobby?.()} className="pointer-events-auto inline-flex cursor-pointer items-center gap-2 rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-xs font-semibold text-gray-200 backdrop-blur transition hover:bg-white/10">
             <ArrowLeft className="h-3.5 w-3.5" /> Lobby
           </button>
-          {ownSeat && !ownSeat.left && onLeave && <button title="Leave table and cash out" type="button" onClick={onLeave} disabled={busy || ownSeat.leaving} className="inline-flex items-center gap-2 rounded-xl border border-rose-200/20 bg-black/30 px-3 py-2 text-xs font-semibold text-rose-100 backdrop-blur transition hover:bg-rose-300/10 disabled:opacity-40">
+          {ownSeat && !ownSeat.left && onLeave && <button title="Leave table and cash out" type="button" onClick={() => onLeave()} disabled={busy || ownSeat.leaving} className="pointer-events-auto inline-flex cursor-pointer items-center gap-2 rounded-xl border border-rose-200/20 bg-black/30 px-3 py-2 text-xs font-semibold text-rose-100 backdrop-blur transition hover:bg-rose-300/10 disabled:cursor-not-allowed disabled:opacity-40">
             <LogOut className="h-3.5 w-3.5" /> {ownSeat.leaving ? "Leaving" : "Leave"}
           </button>}
         </div>
@@ -230,6 +233,7 @@ export function PokerTablePreview({
               {action === "fold" ? <Flag className="h-3.5 w-3.5" /> : action === "check" || action === "call" ? <Check className="h-3.5 w-3.5" /> : <Zap className="h-3.5 w-3.5" />}{actionLabels[action]}{action === "call" ? ` ${callAmount}` : (action === "bet" || action === "raise") ? ` ${selectedAmount}` : ""}
             </button>)}
           </div>
+          : !ownSeat && tableReady && onBuyIn && table?.seats.some((seat) => !seat.address) ? <div className="mx-auto flex max-w-3xl items-center justify-between gap-3 text-xs text-gray-300"><span>Open seat · your wallet transfers 1 public ALEO to buy in</span><button type="button" onClick={() => onBuyIn(buyInAmount)} disabled={busy} className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-300 px-4 py-2.5 font-bold text-[#062417] hover:bg-emerald-200 disabled:opacity-40"><Zap className="h-3.5 w-3.5" /> Wallet buy in · {amountLabel(buyInAmount)}</button></div>
           : <div className="mx-auto flex max-w-3xl items-center justify-between gap-3 text-xs text-gray-400"><span>{ownSeat?.left ? "Cash-out completed for this seat" : ownSeat?.leaving ? "Leave requested; waiting for this hand to settle" : ownSeat ? (currentTurn ? `Waiting for Seat ${currentTurnSeat ? currentTurnSeat.seat + 1 : "?"} to act` : "Waiting for the next hand") : "Spectating this table"}</span>{onRefresh && <button type="button" onClick={onRefresh} disabled={busy} className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-2 text-gray-200 hover:bg-white/10 disabled:opacity-40"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button>}</div>}
       </footer>
     </main>
